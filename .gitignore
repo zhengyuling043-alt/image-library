@@ -216,3 +216,9 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# 本地 Python 环境
+.venv/
+
+# 本地测试图片和生成的索引
+data/
