@@ -33,6 +33,8 @@ python -m pip install -r requirements.txt
 - data/test.jpg：默认查询图片
 - data/test_other.jpg：另一张查询图片
 
+可运行 `python make_dataset.py` 程序化生成带同组标注的合成素材（默认 1500 张原图约 3300 张素材，含完全重复组、近重复变体组与独立单张），用于库容量演示与重复检测的准确率/召回率评测；同组真值写入 data/synthetic_labels.json，`--bases`、`--seed` 可控制规模与复现。
+
 ## 运行方式
 
 建立索引：
