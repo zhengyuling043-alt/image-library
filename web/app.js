@@ -147,10 +147,11 @@ $("#collapse-groups").addEventListener("change", () => {
   });
 });
 function invalidateResults() {
-  state.groups = null; $("#collapse-groups").checked = false;
+  state.groups = null; $("#collapse-groups").checked = false; lastSearch = null;
   $("#group-list").replaceChildren(); $("#group-summary").textContent = "素材已更新，请重新分析。"; $("#group-empty").hidden = false;
   $("#compare-left").replaceChildren(node("p", "muted", "素材已更新，请重新对比。")); $("#compare-right").replaceChildren(node("p", "muted", "素材已更新，请重新对比。"));
   $("#search-grid").replaceChildren(); $("#search-empty").hidden = false; $("#search-summary").textContent = "最多展示 20 张";
+  $("#search-compare-left").replaceChildren(node("p", "muted", "素材已更新，请重新对比。")); $("#search-compare-right").replaceChildren(node("p", "muted", "素材已更新，请重新对比。"));
 }
 $("#update-index").addEventListener("click", () => guarded("正在检查素材变化，首次处理可能需要稍候…", async () => {
   const result = await task("/api/update", {}, "正在更新索引，请保持页面开启…");
@@ -187,6 +188,7 @@ function chooseQuery(file) {
   if (!file || state.busy) return;
   if (file.size > 20 * 1024 * 1024) return notify("单张图片不能超过 20 MB", true);
   state.query = file; if (state.queryURL) URL.revokeObjectURL(state.queryURL); state.queryURL = URL.createObjectURL(file);
+  lastSearch = null;
   $("#query-preview").src = state.queryURL; $("#query-preview").hidden = false; $("#query-placeholder").hidden = true;
   $("#query-name").textContent = file.name; $("#search-submit").disabled = false;
   $("#search-grid").replaceChildren(); $("#search-empty").hidden = false; $("#search-summary").textContent = "点击查找以获取新结果";
@@ -197,11 +199,43 @@ $("#query-drop").addEventListener("dragleave", () => $("#query-drop").classList.
 $("#query-drop").addEventListener("drop", event => {event.preventDefault(); $("#query-drop").classList.remove("dragover"); chooseQuery(event.dataTransfer.files[0]);});
 $("#search-submit").addEventListener("click", () => guarded("正在查找相似素材，首次加载模型可能需要稍候…", async () => {
   const data = await fileData(state.query);
-  const result = await task("/api/search", {data}, "正在计算查询图片的特征并搜索…");
-  $("#search-grid").replaceChildren(...result.results.map(row => {const item = state.items.find(i => i.name === row.name); return item ? card(item, {score: row.score}) : node("span");}));
-  $("#search-empty").hidden = result.results.length > 0;
-  $("#search-summary").textContent = `检索 ${result.searched} 张 · 显示 ${result.results.length} 张`;
-  if (result.skipped) notify(`跳过 ${result.skipped} 张已变化素材，请更新索引。`);
+  lastSearch = await task("/api/search", {data}, "正在计算查询图片的特征并搜索…");
+  renderSearch();
+  if (lastSearch.skipped) notify(`跳过 ${lastSearch.skipped} 张已变化素材，请更新索引。`);
+}));
+
+let lastSearch = null, searchMode = "single";
+function searchCard(row) {const item = state.items.find(i => i.name === row.name); return item ? card(item, {score: row.score}) : node("span");}
+function clampThreshold(value) {return Math.min(1, Math.max(0, Number(value) || 0));}
+function renderSearch() {
+  if (!lastSearch) return;
+  if (searchMode === "single") {
+    const threshold = clampThreshold($("#search-sim").value);
+    const rows = lastSearch.results.filter(row => row.score >= threshold).slice(0, 20);
+    $("#search-grid").hidden = false; $("#search-compare").hidden = true;
+    $("#search-grid").replaceChildren(...rows.map(searchCard));
+    $("#search-empty").hidden = rows.length > 0;
+    $("#search-summary").textContent = `检索 ${lastSearch.searched} 张 · 显示 ${rows.length} 张` + (threshold ? ` · 相似度 ≥ ${threshold}` : "");
+  } else {
+    $("#search-grid").hidden = true; $("#search-compare").hidden = false; $("#search-empty").hidden = true;
+    for (const side of ["left", "right"]) {
+      const threshold = clampThreshold($("#search-" + side + "-sim").value);
+      const rows = lastSearch.results.filter(row => row.score >= threshold).slice(0, 20);
+      const container = $("#search-compare-" + side);
+      container.replaceChildren(node("p", "result-summary", `相似度 ≥ ${threshold} · ${rows.length} 张`), ...rows.map(searchCard));
+      if (!rows.length) container.append(node("p", "muted", "该阈值下没有结果。"));
+    }
+    $("#search-summary").textContent = `检索 ${lastSearch.searched} 张 · 双阈值对比`;
+  }
+}
+$("#search-sim").addEventListener("input", renderSearch);
+$("#search-left-sim").addEventListener("input", renderSearch);
+$("#search-right-sim").addEventListener("input", renderSearch);
+document.querySelectorAll("[data-search-mode]").forEach(button => button.addEventListener("click", () => {
+  searchMode = button.dataset.searchMode;
+  document.querySelectorAll("[data-search-mode]").forEach(item => item.classList.toggle("active", item === button));
+  $("#search-thresholds").hidden = searchMode !== "compare";
+  renderSearch();
 }));
 
 function parameters(prefix) {
@@ -212,6 +246,11 @@ function parameters(prefix) {
 function groupCard(group) {
   const box = node("article", "group-card"), header = node("div", "group-header");
   header.append(node("h3", "", `组 ${group.id} · ${group.members.length} 个版本`), node("span", "", group.category === "exact" ? "完全重复" : "含近重复候选"));
+  if (group.members.length > 1) {
+    const button = node("button", "cleanup-button", "清理其余版本");
+    button.addEventListener("click", () => cleanupGroup(group));
+    header.append(button);
+  }
   const images = node("div", "group-images");
   group.members.forEach(name => {const item = state.items.find(i => i.name === name); if (item) images.append(card(item, {badge: name === group.suggested_keep ? "推荐保留" : undefined}));});
   const evidence = node("details", "evidence"); evidence.append(node("summary", "", "查看判定依据"));
@@ -219,12 +258,27 @@ function groupCard(group) {
   box.append(header, images, node("p", "group-reason", "推荐依据：像素数量优先；同尺寸时按文件名排序。"), evidence); return box;
 }
 function summaryText(result) {return `${result.total} 张素材 · ${result.groups.length} 个候选组 · ${result.singletons.length} 张未归组`;}
-$("#group-run").addEventListener("click", () => guarded("正在比较图片并生成候选组…", async () => {
-  const result = await task("/api/groups", parameters("group"), "正在检查组内相似关系…");
+async function runGroups(parameters) {
+  const result = await task("/api/groups", parameters, "正在检查组内相似关系…");
   $("#group-summary").textContent = summaryText(result);
   $("#group-list").replaceChildren(...result.groups.map(groupCard)); $("#group-empty").hidden = result.groups.length > 0;
   if (!result.groups.length) {$("#group-empty h3").textContent = "当前条件下没有发现重复组"; $("#group-empty p").textContent = "可以对比其他阈值，或导入已知重复的测试图片。";}
-}));
+  return result;
+}
+function cleanupGroup(group) {
+  if (state.busy) return notify("已有任务正在运行，请稍候");
+  const extra = group.members.filter(name => name !== group.suggested_keep);
+  const message = `将永久删除组 ${group.id} 中除推荐保留项「${group.suggested_keep}」以外的 ${extra.length} 个版本，删除后不可恢复。\n\n确定清理吗？`;
+  if (!window.confirm(message)) return;
+  guarded("正在清理多余版本…", async () => {
+    const result = await task("/api/cleanup", {similarity: Number($("#group-sim").value), distance: Number($("#group-dist").value), names: extra}, "正在删除文件并同步索引…");
+    invalidateResults(); await refreshLibrary();
+    const rejected = result.rejected.length;
+    notify(`已删除 ${result.deleted.length} 个版本并更新索引。` + (rejected ? `${rejected} 个文件未能清理（可能已不是组内版本）。` : ""), rejected > 0);
+    if (result.deleted.length) await runGroups(parameters("group"));
+  });
+}
+$("#group-run").addEventListener("click", () => guarded("正在比较图片并生成候选组…", async () => { await runGroups(parameters("group")); }));
 document.querySelectorAll("[data-mode]").forEach(button => button.addEventListener("click", () => {
   document.querySelectorAll("[data-mode]").forEach(item => item.classList.toggle("active", item === button));
   $("#group-view").hidden = button.dataset.mode !== "groups"; $("#compare-view").hidden = button.dataset.mode !== "compare";

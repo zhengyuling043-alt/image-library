@@ -159,7 +159,33 @@ class LibraryApp:
                 continue
             results.append({"name": name, "score": float(np.clip(vectors[name] @ vector, -1, 1))})
         results.sort(key=lambda item: (-item["score"], item["name"]))
-        return {"results": results[:20], "searched": len(results), "skipped": skipped}
+        # 返回全量得分供前端做阈值过滤与双阈值对比，一次编码多次复用。
+        return {"results": results, "searched": len(results), "skipped": skipped}
+
+    def cleanup(self, body):
+        cosine = float(body.get("similarity", .94))
+        distance = int(body.get("distance", 6))
+        if not np.isfinite(cosine) or not 0 <= cosine <= 1 or not 0 <= distance <= 64:
+            raise ValueError("相似度应在 0～1，哈希距离应在 0～64")
+        names = body.get("names")
+        if not isinstance(names, list) or not names or not all(isinstance(n, str) for n in names):
+            raise ValueError("请先选择要清理的重复版本")
+        report = generate_groups(self.library, self.index, cosine, distance, write_report=False)
+        # 以刚生成的分组为准：只允许删除组内非推荐保留项，防止误删独立素材。
+        removable = {}
+        for group in report["groups"]:
+            for member in group["members"]:
+                if member != group["suggested_keep"]:
+                    removable[member] = group["id"]
+        deleted, rejected = [], []
+        for name in dict.fromkeys(names):
+            if name in removable:
+                safe_file(self.library, name).unlink()
+                deleted.append(name)
+            else:
+                rejected.append(name)
+        counts = update_index(self.library, self.index, self.encoder)["counts"] if deleted else None
+        return {"deleted": deleted, "rejected": rejected, "counts": counts}
 
     def groups(self, parameters):
         cosine = float(parameters.get("similarity", .94))
@@ -261,6 +287,8 @@ def make_handler(app):
                     return self.respond(app.submit("groups", lambda: app.groups(body)))
                 if self.path == "/api/compare":
                     return self.respond(app.submit("compare", lambda: {"left": app.groups(body["left"]), "right": app.groups(body["right"])}))
+                if self.path == "/api/cleanup":
+                    return self.respond(app.submit("cleanup", lambda: app.cleanup(body)))
                 if self.path == "/api/export":
                     return self.respond(app.export(body.get("names")), "text/csv; charset=utf-8", extra={"Content-Disposition": 'attachment; filename="image-list.csv"'})
                 self.respond({"error": "操作不存在"}, status=404)

@@ -31,6 +31,15 @@ python -m unittest test_web_app -v
 | TC14 | 端到端 | 导入 → 更新 → 搜索全链路 | 素材目录为空 | HTTP 导入 `sample.png`；POST 更新索引并轮询任务；GET 素材库；POST 以图搜图 | 导入返回 pending；更新任务完成且新增 1；快照 total=1、ready=1；搜索第一名就是 `sample.png`，得分 1.0 | `test_tc14_import_update_search_end_to_end` |
 | TC15 | HTTP 接口 | 导出、缩略图与错误处理 | 库中已有 `sample.png` | POST 导出；GET 缩略图；GET 未知路径；缩略图传穿越路径；POST 非对象 JSON | 导出 200 且带 UTF-8 BOM；缩略图 200 且为 JPEG；未知路径 404；穿越路径 400；格式错误 400 | `test_tc15_export_thumbnail_and_error_pages` |
 
+## 扩展用例（新增功能）
+
+核心功能迭代时补充的用例，不属于课程要求的 15 条，随代码一并维护。
+
+| 编号 | 模块 | 用例名称 | 前置条件 | 操作步骤 | 预期结果 | 自动化方法 |
+|---|---|---|---|---|---|---|
+| TC16 | 重复组清理 | 批量清理组内多余版本 | 库中有近重复组（master.png 与其缩小版）及独立素材 | HTTP 导入 3 张图并更新索引；POST `/api/cleanup` 删除组内非推荐项；再对推荐项与独立素材发起清理 | 第一轮删除成功且索引同步（deleted=1）；重新分组后无候选组；第二轮全部被拒绝（非组内非推荐项不可删） | `test_tc16_cleanup_removes_extra_versions` |
+| TC17 | 搜索阈值对比 | 搜索返回全量排序得分 | 索引含 25 张图，向量与查询可精确计算 | 构造索引后直接调用查询 | 返回全部 25 条结果（不止前 20），按得分降序、同分按文件名排序——前端据此做单阈值过滤与双阈值并排对比，且只需一次模型编码 | `test_tc17_query_returns_all_sorted_results` |
+
 ## 用例设计说明
 
 - **覆盖维度**：输入校验（TC02～TC07、TC09）、安全防护（TC01、TC13、TC15 的穿越与注入）、状态与数据正确性（TC10～TC12）、任务调度（TC08）、端到端业务流程（TC14、TC15）。
