@@ -29,6 +29,12 @@ def png_bytes(color=(10, 20, 30), size=(8, 6)):
     return buffer.getvalue()
 
 
+def png_from_array(array):
+    buffer = io.BytesIO()
+    Image.fromarray(array).save(buffer, "PNG")
+    return buffer.getvalue()
+
+
 def b64(data):
     return base64.b64encode(data).decode()
 
@@ -247,6 +253,54 @@ class WebAppTestCase(unittest.TestCase):
         self.assertEqual(self.request(base_url, "/api/missing")[0], 404)
         self.assertEqual(self.request(base_url, "/api/thumbnail?name=../secret.png")[0], 400)
         self.assertEqual(self.request(base_url, "/api/update", body=[1, 2], token=token)[0], 400)
+
+    def test_tc16_cleanup_removes_extra_versions(self):
+        """TC16 扩展·批量清理：只删组内非推荐项，索引同步更新。"""
+        base_url = self.serve()
+        token = self.app.token
+        gradient = np.tile(np.arange(64, dtype=np.uint8) * 4, (64, 1))
+        buffer = io.BytesIO()
+        Image.fromarray(gradient).resize((32, 32)).save(buffer, "PNG")
+        big = png_from_array(gradient)
+        small = buffer.getvalue()
+        other = png_from_array(gradient.T.copy())
+        for name, data in [("master.png", big), ("master_copy.jpg", small), ("single.png", other)]:
+            _, body = self.request(base_url, "/api/import", {"name": name, "data": b64(data)}, token)
+        _, body = self.request(base_url, "/api/update", {}, token)
+        job = self.wait_job(base_url, token, json.loads(body)["job"])
+        self.assertEqual(job["result"]["counts"]["added"], 3)
+        _, body = self.request(base_url, "/api/cleanup", {"names": ["master_copy.jpg"]}, token)
+        job = self.wait_job(base_url, token, json.loads(body)["job"])
+        self.assertEqual(job["result"]["deleted"], ["master_copy.jpg"])
+        self.assertEqual(job["result"]["rejected"], [])
+        self.assertEqual(job["result"]["counts"]["deleted"], 1)
+        self.assertFalse((self.library / "master_copy.jpg").exists())
+        self.assertTrue((self.library / "master.png").exists())
+        _, body = self.request(base_url, "/api/groups", {"similarity": .94, "distance": 6}, token)
+        job = self.wait_job(base_url, token, json.loads(body)["job"])
+        self.assertEqual(job["result"]["groups"], [])
+        _, body = self.request(base_url, "/api/cleanup", {"names": ["master.png", "single.png"]}, token)
+        job = self.wait_job(base_url, token, json.loads(body)["job"])
+        self.assertEqual(job["result"]["deleted"], [])
+        self.assertEqual(sorted(job["result"]["rejected"]), ["master.png", "single.png"])
+
+    def test_tc17_query_returns_all_sorted_results(self):
+        """TC17 扩展·阈值对比数据源：返回全部排序得分，不止前 20。"""
+        names = [f"img_{i:02d}.png" for i in range(25)]
+        for name in names:
+            (self.library / name).write_bytes(png_bytes())
+        records = {name: {"sha256": fingerprint(self.library / name)} for name in names}
+        # 第 i 张图向量的第 i 维为 1，查询向量前 24 维均为 1/24：前 24 张同分，第 25 张为 0。
+        vectors = {name: np.eye(512, dtype=np.float32)[i] for i, name in enumerate(names)}
+        save_index(self.index, records, vectors)
+        self.app.encoder = lambda path: np.concatenate([np.full(24, 1 / 24, dtype=np.float32), np.zeros(488, dtype=np.float32)])
+        result = self.app.query(png_bytes())
+        self.assertEqual(result["searched"], 25)
+        self.assertEqual(len(result["results"]), 25)
+        scores = [row["score"] for row in result["results"]]
+        self.assertEqual(scores, sorted(scores, reverse=True))
+        self.assertEqual([row["name"] for row in result["results"][:24]], names[:24])
+        self.assertEqual(result["results"][-1]["name"], "img_24.png")
 
 
 if __name__ == "__main__":
