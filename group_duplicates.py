@@ -50,7 +50,7 @@ def complete_groups(names, matches):
     return groups
 
 
-def generate_groups(library=LIBRARY, index_file=INDEX_FILE, similarity=0.94, max_distance=6):
+def generate_groups(library=LIBRARY, index_file=INDEX_FILE, similarity=0.94, max_distance=6, write_report=True):
     if not (-1 <= similarity <= 1) or not (0 <= max_distance <= 64):
         raise ValueError("相似度阈值须在 -1～1，哈希距离须在 0～64。")
     if not library.is_dir() or not index_file.is_file():
@@ -118,7 +118,8 @@ def generate_groups(library=LIBRARY, index_file=INDEX_FILE, similarity=0.94, max
         "similar_pairs_not_merged": similar_pairs,
     }
     output = index_file.parent / "duplicate_groups.json"
-    output.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    if write_report:
+        output.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"共检查 {len(info)} 张图片，发现 {len(groups)} 个候选重复组，{len(singles)} 张未归组。")
     for group in groups:
         label = "完全重复" if group["category"] == "exact" else "含近重复候选"
