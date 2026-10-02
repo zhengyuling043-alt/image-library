@@ -84,3 +84,53 @@ python incremental_search.py update --rebuild
 ```bat
 python -m unittest test_incremental_search -v
 ```
+
+## 重复与近重复分组原型
+
+```bat
+python group_duplicates.py
+python -m unittest test_group_duplicates -v
+```
+
+从增量索引读取向量，检查素材没有变化后生成 `data/index/duplicate_groups.json`，不删除原图，也不重新调用模型。
+
+- exact：SHA-256 相同的完全重复文件。
+- near：不同文件的向量余弦相似度至少 0.94，且 64 位差分感知哈希（dHash）距离不超过 6。两个默认值只是初始实验值，尚未经评测标定。
+- similar：向量达到上述阈值，但感知哈希不通过，仅列入相似图片对，不据此合并。
+- 其他图片保持独立。这些标签是算法判定，不是人工标准答案。
+
+先把完全重复文件绑定，再按文件名排序贪心分组。不同组之间所有成员对都须满足规则，防止 A 像 B、B 像 C 就把 A/B/C 全部连起来；该策略仍受入组顺序影响，不保证最优分组。推荐保留项仅按像素数量比较，同分按文件名排序，不等同于最高画质。
+
+调整实验参数示例（重新生成报告）：
+
+```bat
+python group_duplicates.py --similarity 0.94 --hash-distance 6
+```
+
+限制：该原型适用于小库，全部图片对的比较及结果缓存最坏为平方级开销。dHash 对裁剪、边框、水印等变化可能漏判；不能只为某张图片入组而放宽阈值，应在有来源记录的正负样本上评测。本阶段尚无人工审核页面、清理功能或完整的质量评分。
+
+## 批量评测数据与阈值实验
+
+```bat
+python evaluate_duplicates.py prepare
+python evaluate_duplicates.py evaluate
+```
+
+prepare 默认从 `data/library` 中选择 10 张 `pexels-*` 图片（随机种子 42），按原图划分为 6 张调参原图和 4 张测试原图。每张生成 7 个版本：标准化原图、文件副本、50% 缩放、亮度 70%、四边各裁去 10%、右下角水印、JPEG 质量 55。原图预处理为 RGB，最长边不超过 1024；全部文件写入独立的 `data/evaluation`，原素材不变。已存在的评测目录不会覆盖，可用 `--dataset data/evaluation_v2` 指定新目录。
+
+自备原图目录示例：
+
+```bat
+python evaluate_duplicates.py prepare --source data/originals --pattern "*" --count 10 --dataset data/evaluation_v2
+python evaluate_duplicates.py evaluate --dataset data/evaluation_v2
+```
+
+`manifest.json` 记录来源文件、哈希、变换参数和分区；需检查被选原图确为独立素材，程序只能排除文件完全重复，无法自动保证不同原图之间不是近重复。所有同源版本是正样本对，不同来源是负样本对。调参集与测试集按来源分离，不进行跨分区比较。
+
+evaluate 建立独立增量索引，比较 9 组候选阈值（余弦 0.90/0.94/0.97 × 哈希距离 6/12/18），仅根据调参集选择候选，再与默认阈值在测试集比较。优先选择调参集查准率至少 98% 的最高召回率方案；不达标时只报告 F1 最高候选。结果写入 `evaluation_report.md` 与 `evaluation_results.json`，含 TP/FP/FN/TN、查准率、召回率、F1、误判率、错误图片对，以及原图对各变换版本的检出情况。不会自动修改分组脚本阈值。
+
+这属于图片对判定评测，不是完整聚类评测，也不是课程要求的 15 条软件测试用例。10 张原图的结果只能用于初步诊断，不足以证明实际去重精度；若依据测试结果继续改算法，需另留新的原图用于最终验收。
+
+```bat
+python -m unittest test_evaluate_duplicates test_group_duplicates test_incremental_search -v
+```
