@@ -11,3 +11,5 @@
 .cleanup-button{padding:6px 10px;font-size:12px;border-radius:7px;background:#f7efec;color:#a04a3c;white-space:nowrap}
 .cleanup-button:hover{background:#f0e2dc}
 .compare-columns .search-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+
+.library-actions{display:flex;justify-content:center;gap:14px;margin:24px 0}.keeper-label{display:flex;align-items:center;gap:10px;margin:14px 0;font-size:12px;color:#65796b}.keeper-label select{max-width:75%;min-width:0}.search-results,.compare-columns>div{min-width:0}

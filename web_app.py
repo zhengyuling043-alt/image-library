@@ -4,7 +4,8 @@ import base64
 import csv
 import io
 import json
-import mimetypes
+import hashlib
+import hmac
 import re
 import secrets
 import tempfile
@@ -21,7 +22,7 @@ import numpy as np
 from PIL import Image, ImageOps
 
 from group_duplicates import generate_groups
-from incremental_search import ROOT, LIBRARY, INDEX_FILE, EXTENSIONS, Encoder, fingerprint, read_index, update_index
+from incremental_search import ROOT, LIBRARY, INDEX_FILE, EXTENSIONS, Encoder, fingerprint, read_index, save_index, update_index
 
 WEB = ROOT / "web"
 MAX_FILE = 20 * 1024 * 1024
@@ -73,6 +74,7 @@ class LibraryApp:
         self.jobs = {}
         self.active_job = None
         self.working = False
+        self.metadata_cache = {}
 
     def snapshot(self):
         records, _ = read_index(self.index)
@@ -80,19 +82,34 @@ class LibraryApp:
         for path in sorted(self.library.iterdir()):
             if not path.is_file() or path.suffix.lower() not in EXTENSIONS:
                 continue
-            stat = path.stat()
+            stat = None
             try:
-                with Image.open(path) as image:
-                    width, height = ImageOps.exif_transpose(image).size
-                status = "ready" if records.get(path.name, {}).get("sha256") == fingerprint(path) else "pending"
+                stat = path.stat()
+                key = (stat.st_mtime_ns, stat.st_ctime_ns, stat.st_size)
+                cached = self.metadata_cache.get(path.name)
+                if cached is None or cached[0] != key:
+                    with Image.open(path) as image:
+                        # EXIF 转向 5～8 会交换宽高，无需解码整张图。
+                        width, height = image.size
+                        if image.getexif().get(274) in (5, 6, 7, 8):
+                            width, height = height, width
+                    cached = (key, width, height, fingerprint(path))
+                    self.metadata_cache[path.name] = cached
+                _, width, height, digest = cached
+                status = "ready" if records.get(path.name, {}).get("sha256") == digest else "pending"
                 error = None
+            except FileNotFoundError:
+                continue
             except (OSError, ValueError, Image.DecompressionBombError) as exc:
+                if stat is None:
+                    continue
                 width = height = 0
                 status, error = "failed", str(exc)
             items.append(dict(name=path.name, width=width, height=height, bytes=stat.st_size,
                               version=stat.st_mtime_ns, status=status, error=error))
         ready = sum(i["status"] == "ready" for i in items)
         return dict(items=items, total=len(items), ready=ready, pending=len(items) - ready,
+                    recoverable=self.recoverable_batches(),
                     active_job=self.active_job if self.working else None)
 
     def submit(self, action, task):
@@ -162,30 +179,90 @@ class LibraryApp:
         # 返回全量得分供前端做阈值过滤与双阈值对比，一次编码多次复用。
         return {"results": results, "searched": len(results), "skipped": skipped}
 
+    def sign_review(self, review):
+        encoded = json.dumps(review, sort_keys=True, ensure_ascii=False).encode("utf-8")
+        return hmac.new(self.token.encode(), encoded, hashlib.sha256).hexdigest()
+
+    def recoverable_batches(self):
+        trash = self.index.parent / "trash"
+        batches = []
+        if trash.exists():
+            for path in trash.glob("*/receipt.json"):
+                try:
+                    receipt = json.loads(path.read_text(encoding="utf-8"))
+                    remaining = [name for name in receipt["files"] if safe_file(path.parent / "files", name).is_file()]
+                    if remaining:
+                        batches.append({"id": path.parent.name, "count": len(remaining), "created": receipt["created"]})
+                except (OSError, ValueError, KeyError):
+                    continue
+        return sorted(batches, key=lambda item: item["created"], reverse=True)
+
     def cleanup(self, body):
-        cosine = float(body.get("similarity", .94))
-        distance = int(body.get("distance", 6))
-        if not np.isfinite(cosine) or not 0 <= cosine <= 1 or not 0 <= distance <= 64:
-            raise ValueError("相似度应在 0～1，哈希距离应在 0～64")
+        review, signature = body.get("review"), body.get("signature", "")
+        if not isinstance(review, dict) or not isinstance(signature, str) or not hmac.compare_digest(signature, self.sign_review(review)):
+            raise ValueError("分组结果已失效，请重新分析后清理")
         names = body.get("names")
         if not isinstance(names, list) or not names or not all(isinstance(n, str) for n in names):
             raise ValueError("请先选择要清理的重复版本")
-        report = generate_groups(self.library, self.index, cosine, distance, write_report=False)
-        # 以刚生成的分组为准：只允许删除组内非推荐保留项，防止误删独立素材。
-        removable = {}
-        for group in report["groups"]:
-            for member in group["members"]:
-                if member != group["suggested_keep"]:
-                    removable[member] = group["id"]
-        deleted, rejected = [], []
-        for name in dict.fromkeys(names):
-            if name in removable:
-                safe_file(self.library, name).unlink()
-                deleted.append(name)
-            else:
-                rejected.append(name)
-        counts = update_index(self.library, self.index, self.encoder)["counts"] if deleted else None
-        return {"deleted": deleted, "rejected": rejected, "counts": counts}
+        names = list(dict.fromkeys(names))
+        members = review["hashes"]
+        keep = body.get("keep")
+        if keep not in members or keep in names or any(name not in members for name in names):
+            raise ValueError("清理范围不属于已查看的重复组，或包含要保留的图片")
+        records, vectors = read_index(self.index)
+        for name, digest in members.items():
+            path = safe_file(self.library, name)
+            if not path.is_file() or fingerprint(path) != digest or records.get(name, {}).get("sha256") != digest:
+                raise ValueError("组内图片已变化，请更新索引并重新分析；本次未清理任何图片")
+        batch_id = uuid.uuid4().hex
+        batch = self.index.parent / "trash" / batch_id
+        storage = batch / "files"
+        storage.mkdir(parents=True)
+        receipt = {"created": time.time(), "files": {n: records[n]["sha256"] for n in names}, "keep": keep}
+        (batch / "receipt.json").write_text(json.dumps(receipt, ensure_ascii=False), encoding="utf-8")
+        save_index(batch / "vectors.npz", {n: records[n] for n in names}, {n: vectors[n] for n in names})
+        moved = []
+        try:
+            for name in names:
+                safe_file(self.library, name).replace(safe_file(storage, name))
+                moved.append(name)
+            save_index(self.index, {n: r for n, r in records.items() if n not in names},
+                       {n: v for n, v in vectors.items() if n not in names})
+        except Exception:
+            for name in reversed(moved):
+                safe_file(storage, name).replace(safe_file(self.library, name))
+            raise
+        return {"deleted": names, "rejected": [], "batch": batch_id,
+                "counts": {"deleted": len(names)}, "message": "已移入本地回收区，可恢复"}
+
+    def restore(self, body):
+        identifier = body.get("batch", "")
+        if not isinstance(identifier, str) or not re.fullmatch(r"[0-9a-f]{32}", identifier):
+            raise ValueError("无效回收批次")
+        batch = self.index.parent / "trash" / identifier
+        receipt = json.loads((batch / "receipt.json").read_text(encoding="utf-8"))
+        old_records, old_vectors = read_index(batch / "vectors.npz")
+        records, vectors = read_index(self.index)
+        names = [n for n in receipt["files"] if safe_file(batch / "files", n).is_file()]
+        if not names:
+            raise ValueError("该批次已恢复")
+        for name in names:
+            if safe_file(self.library, name).exists() or name in records:
+                raise ValueError(f"素材库已有同名文件 {name}，为避免覆盖，本次未恢复")
+            if fingerprint(safe_file(batch / "files", name)) != receipt["files"][name]:
+                raise ValueError("回收文件已变化，停止恢复")
+        moved = []
+        try:
+            for name in names:
+                safe_file(batch / "files", name).replace(safe_file(self.library, name))
+                moved.append(name)
+            save_index(self.index, {**records, **{n: old_records[n] for n in names}},
+                       {**vectors, **{n: old_vectors[n] for n in names}})
+        except Exception:
+            for name in reversed(moved):
+                safe_file(self.library, name).replace(safe_file(batch / "files", name))
+            raise
+        return {"restored": names}
 
     def groups(self, parameters):
         cosine = float(parameters.get("similarity", .94))
@@ -193,6 +270,10 @@ class LibraryApp:
         if not np.isfinite(cosine) or not 0 <= cosine <= 1 or not 0 <= distance <= 64:
             raise ValueError("相似度应在 0～1，哈希距离应在 0～64")
         report = generate_groups(self.library, self.index, cosine, distance, write_report=False)
+        for group in report["groups"]:
+            review = {"thresholds": report["thresholds"],
+                      "hashes": {n: report["images"][n]["sha256"] for n in group["members"]}}
+            group["review"], group["signature"] = review, self.sign_review(review)
         return {"groups": report["groups"], "singletons": report["singletons"],
                 "thresholds": report["thresholds"], "total": len(report["images"])}
 
@@ -243,9 +324,11 @@ def make_handler(app):
                 if url.path == "/":
                     page = (WEB / "index.html").read_text(encoding="utf-8").replace("__TOKEN__", app.token)
                     return self.respond(page.encode("utf-8"), "text/html; charset=utf-8")
-                if url.path in {"/app.js", "/style.css"}:
+                if url.path in {"/characters/rilakkuma.webp", "/characters/korilakkuma.webp", "/characters/kiiroitori.webp", "/characters/group.webp"}:
+                    return self.respond((WEB / url.path.lstrip("/")).read_bytes(), "image/webp")
+                if url.path in {"/app.js", "/style.css", "/rilakkuma.css", "/bear-family.svg"}:
                     path = WEB / url.path[1:]
-                    kind = "text/javascript" if path.suffix == ".js" else "text/css"
+                    kind = {".js": "text/javascript", ".css": "text/css", ".svg": "image/svg+xml"}[path.suffix]
                     return self.respond(path.read_bytes(), kind + "; charset=utf-8")
                 if url.path == "/api/library":
                     return self.respond(app.snapshot())
@@ -261,7 +344,7 @@ def make_handler(app):
                     stat = path.stat()
                     return self.respond(thumbnail(str(path), stat.st_mtime_ns, stat.st_size), "image/jpeg")
                 self.respond({"error": "页面不存在"}, status=404)
-            except (ValueError, OSError, RuntimeError) as error:
+            except (ValueError, OSError, RuntimeError, Image.DecompressionBombError) as error:
                 self.respond({"error": str(error)}, status=400)
 
         def do_POST(self):
@@ -289,6 +372,8 @@ def make_handler(app):
                     return self.respond(app.submit("compare", lambda: {"left": app.groups(body["left"]), "right": app.groups(body["right"])}))
                 if self.path == "/api/cleanup":
                     return self.respond(app.submit("cleanup", lambda: app.cleanup(body)))
+                if self.path == "/api/restore":
+                    return self.respond(app.submit("restore", lambda: app.restore(body)))
                 if self.path == "/api/export":
                     return self.respond(app.export(body.get("names")), "text/csv; charset=utf-8", extra={"Content-Disposition": 'attachment; filename="image-list.csv"'})
                 self.respond({"error": "操作不存在"}, status=404)

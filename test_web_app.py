@@ -58,10 +58,8 @@ class WebAppTestCase(unittest.TestCase):
         self.root = Path(folder.name)
         self.library = self.root / "library"
         self.index = self.root / "index" / "incremental.npz"
-        patching = patch.object(web_app, "Encoder", FakeEncoder)
-        patching.start()
-        self.addCleanup(patching.stop)
         self.app = web_app.LibraryApp(library=self.library, index=self.index)
+        self.addCleanup(self.app.executor.shutdown, wait=True)
 
     # ---------- TC01～TC12：函数与应用层 ----------
 
@@ -180,6 +178,7 @@ class WebAppTestCase(unittest.TestCase):
         thread.start()
         self.addCleanup(thread.join)
         self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
         return f"http://127.0.0.1:{server.server_port}"
 
     def request(self, base_url, path, body=None, token=None, host=None):
@@ -190,12 +189,13 @@ class WebAppTestCase(unittest.TestCase):
         method = "GET" if body is None else "POST"
         req = urllib.request.Request(base_url + path, data=data, headers=headers, method=method)
         if host:
-            req.host = host
+            req.add_header("Host", host)
         try:
-            with urllib.request.urlopen(req, timeout=10) as response:
+            with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(req, timeout=10) as response:
                 return response.status, response.read()
         except urllib.error.HTTPError as error:
-            return error.code, error.read()
+            with error:
+                return error.code, error.read()
 
     def wait_job(self, base_url, token, job_id, timeout=10):
         deadline = time.time() + timeout
@@ -269,7 +269,9 @@ class WebAppTestCase(unittest.TestCase):
         _, body = self.request(base_url, "/api/update", {}, token)
         job = self.wait_job(base_url, token, json.loads(body)["job"])
         self.assertEqual(job["result"]["counts"]["added"], 3)
-        _, body = self.request(base_url, "/api/cleanup", {"names": ["master_copy.jpg"]}, token)
+        group = self.app.groups({})["groups"][0]
+        cleanup_body = {"names": ["master_copy.jpg"], "keep": "master.png", "review": group["review"], "signature": group["signature"]}
+        _, body = self.request(base_url, "/api/cleanup", cleanup_body, token)
         job = self.wait_job(base_url, token, json.loads(body)["job"])
         self.assertEqual(job["result"]["deleted"], ["master_copy.jpg"])
         self.assertEqual(job["result"]["rejected"], [])
@@ -279,10 +281,69 @@ class WebAppTestCase(unittest.TestCase):
         _, body = self.request(base_url, "/api/groups", {"similarity": .94, "distance": 6}, token)
         job = self.wait_job(base_url, token, json.loads(body)["job"])
         self.assertEqual(job["result"]["groups"], [])
-        _, body = self.request(base_url, "/api/cleanup", {"names": ["master.png", "single.png"]}, token)
+        _, body = self.request(base_url, "/api/cleanup", {**cleanup_body, "names": ["master.png", "single.png"]}, token)
         job = self.wait_job(base_url, token, json.loads(body)["job"])
-        self.assertEqual(job["result"]["deleted"], [])
-        self.assertEqual(sorted(job["result"]["rejected"]), ["master.png", "single.png"])
+        self.assertEqual(job["state"], "failed")
+        self.assertTrue((self.library / "master.png").is_file())
+        self.assertTrue((self.library / "single.png").is_file())
+
+    def prepare_duplicate_group(self):
+        data = png_bytes()
+        for name in ("a.png", "b.png"):
+            (self.library / name).write_bytes(data)
+        web_app.update_index(self.library, self.index, self.app.encoder)
+        group = self.app.groups({})["groups"][0]
+        # 人工选择保留非默认推荐项 b.png。
+        return {"names": ["a.png"], "keep": "b.png", "review": group["review"], "signature": group["signature"]}
+
+    def test_tc18_manual_keeper_and_restore(self):
+        body = self.prepare_duplicate_group()
+        result = self.app.cleanup(body)
+        self.assertFalse((self.library / "a.png").exists())
+        self.assertTrue((self.library / "b.png").is_file())
+        self.assertEqual(self.app.snapshot()["ready"], 1)
+        self.assertEqual(self.app.recoverable_batches()[0]["id"], result["batch"])
+        restored = self.app.restore({"batch": result["batch"]})
+        self.assertEqual(restored["restored"], ["a.png"])
+        self.assertEqual(self.app.snapshot()["ready"], 2)
+        self.assertEqual(self.app.recoverable_batches(), [])
+
+    def test_tc19_changed_picture_invalidates_cleanup(self):
+        body = self.prepare_duplicate_group()
+        (self.library / "a.png").write_bytes(png_bytes((50, 60, 70)))
+        with self.assertRaises(ValueError):
+            self.app.cleanup(body)
+        self.assertTrue((self.library / "a.png").exists())
+        self.assertTrue((self.library / "b.png").exists())
+
+    def test_tc20_cleanup_rolls_back_when_index_save_fails(self):
+        body = self.prepare_duplicate_group()
+        original = web_app.save_index
+        def failing(path, records, vectors):
+            if path == self.index:
+                raise OSError("simulated disk failure")
+            return original(path, records, vectors)
+        with patch.object(web_app, "save_index", failing):
+            with self.assertRaises(OSError):
+                self.app.cleanup(body)
+        self.assertEqual(self.app.snapshot()["ready"], 2)
+        self.assertEqual(self.app.recoverable_batches(), [])
+
+    def test_tc21_restore_never_overwrites_file(self):
+        body = self.prepare_duplicate_group()
+        result = self.app.cleanup(body)
+        replacement = png_bytes((99, 1, 1))
+        (self.library / "a.png").write_bytes(replacement)
+        with self.assertRaises(ValueError):
+            self.app.restore({"batch": result["batch"]})
+        self.assertEqual((self.library / "a.png").read_bytes(), replacement)
+
+    def test_tc22_review_signature_rejects_modified_group(self):
+        body = self.prepare_duplicate_group()
+        body["review"]["hashes"]["outside.png"] = "fake"
+        with self.assertRaises(ValueError):
+            self.app.cleanup(body)
+        self.assertEqual(self.app.snapshot()["ready"], 2)
 
     def test_tc17_query_returns_all_sorted_results(self):
         """TC17 扩展·阈值对比数据源：返回全部排序得分，不止前 20。"""

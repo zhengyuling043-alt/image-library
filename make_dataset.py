@@ -20,8 +20,9 @@ from pathlib import Path
 import numpy as np
 from PIL import Image, ImageDraw, ImageFilter
 
-LIBRARY = Path("data/library")
-LABELS = Path("data/synthetic_labels.json")
+ROOT = Path(__file__).parent
+LIBRARY = ROOT / "data/library"
+LABELS = ROOT / "data/synthetic_labels.json"
 
 # 近重复变体类型：与 group_duplicates 的 near 档口径对应
 VARIANTS = ("resize", "jpeg", "crop", "brightness")
@@ -72,6 +73,7 @@ def stripes(rng, width, height):
         mask = rows % 2 == 0
     else:
         mask = cols % 2 == 0
+    mask = np.broadcast_to(mask, (height, width))
     arr = np.where(mask[..., None], np.array(color_a), np.array(color_b)).astype(np.uint8)
     return Image.fromarray(arr)
 
@@ -111,6 +113,10 @@ def render_variant(base, kind, rng):
 
 
 def generate(bases, seed, library, labels_path):
+    if bases < 1:
+        raise ValueError("原图数量必须大于 0")
+    if labels_path.exists() or any(library.glob("syn_*.jpg")) or any(library.glob("syn_*.png")):
+        raise ValueError("目标中已有合成图片或标注；请用 --library 和 --labels 指定新位置，避免覆盖旧数据。")
     rng = random.Random(seed)
     library.mkdir(parents=True, exist_ok=True)
     groups, singletons, total = [], [], 0
@@ -164,6 +170,7 @@ def generate(bases, seed, library, labels_path):
                  "准确率/召回率评测；不同原图在视觉上也可能偶然相似，评测结果反映"
                  "真实检出能力而非生成意图。"),
     }
+    labels_path.parent.mkdir(parents=True, exist_ok=True)
     labels_path.write_text(json.dumps(labels, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"\n生成完成：{total} 张素材（{len(groups)} 个重复组 + {len(singletons)} 张单张）。")
     print(f"同组标注已写入：{labels_path}")
