@@ -49,6 +49,36 @@ class FakeEncoder:
 
 
 class WebAppTestCase(unittest.TestCase):
+    def test_new_unnumbered_upload_searches_without_manual_update(self):
+        data = png_bytes()
+        self.app.upload({"name": "假日海边.png", "data": b64(data)})
+        result = self.app.query(data)
+        self.assertEqual(result["results"][0]["name"], "假日海边.png")
+        self.assertAlmostEqual(result["results"][0]["score"], 1.0, places=5)
+        self.assertEqual(self.app.snapshot()["ready"], 1)
+
+    def test_groups_and_compare_skip_bad_image_and_sync_new_copies(self):
+        data = png_bytes()
+        self.app.upload({"name": "原图.png", "data": b64(data)})
+        self.app.upload({"name": "副本.png", "data": b64(data)})
+        (self.library / "broken.jpg").write_bytes(b"broken")
+        original_encoder = self.app.encoder
+        def validating_encoder(path):
+            with Image.open(path) as image:
+                image.load()
+            return original_encoder(path)
+        self.app.encoder = validating_encoder
+        base_url = self.serve()
+        for endpoint, body in [("/api/groups", {}), ("/api/compare", {"left": {}, "right": {"similarity": .9, "distance": 18}})]:
+            _, response = self.request(base_url, endpoint, body, self.app.token)
+            job = self.wait_job(base_url, self.app.token, json.loads(response)["job"])
+            self.assertEqual(job["state"], "done", job)
+            reports = [job["result"]] if endpoint.endswith("groups") else job["result"].values()
+            for report in reports:
+                self.assertEqual(report["total"], 2)
+                self.assertEqual(set(report["groups"][0]["members"]), {"原图.png", "副本.png"})
+                self.assertIn("broken.jpg", report["skipped"])
+
     def setUp(self):
         patcher = patch.object(web_app, "Encoder", FakeEncoder)
         patcher.start()

@@ -47,7 +47,8 @@ async function task(path, body, message) {
 async function guarded(message, work) {
   if (state.busy) return notify("已有任务正在运行，请稍候");
   setBusy(true, message);
-  try {await work();} catch (error) {notify(error.message, true);}
+  const status = $("#operation-status"); status.hidden = false; status.textContent = message;
+  try {await work(); status.textContent = "操作完成。";} catch (error) {status.textContent = "操作失败：" + error.message; notify(error.message, true);}
   finally {setBusy(false);}
 }
 function changePage(page) {
@@ -211,12 +212,14 @@ $("#query-drop").addEventListener("drop", event => {event.preventDefault(); $("#
 $("#search-submit").addEventListener("click", () => guarded("正在查找相似素材，首次加载模型可能需要稍候…", async () => {
   const data = await fileData(state.query);
   lastSearch = await task("/api/search", {data}, "正在计算查询图片的特征并搜索…");
+  await refreshLibrary();
   renderSearch();
   if (lastSearch.skipped) notify(`跳过 ${lastSearch.skipped} 张已变化素材，请更新索引。`);
 }));
 
 let lastSearch = null, searchMode = "single";
 function resetSearchView() {
+  $("#search-notice").hidden = true;
   $("#search-grid").replaceChildren(); $("#search-grid").hidden = searchMode !== "single";
   $("#search-compare").hidden = true;
   $("#search-compare-left").replaceChildren(); $("#search-compare-right").replaceChildren();
@@ -236,6 +239,7 @@ function renderSearch() {
     $("#search-grid").replaceChildren(...rows.map(searchCard));
     $("#search-empty").hidden = rows.length > 0;
     $("#search-summary").textContent = `检索 ${lastSearch.searched} 张 · 命中 ${matches.length} 张 · 展示前 ${rows.length} 张`;
+    renderSearchWarnings();
     if (!rows.length) {$("#search-empty h3").textContent = "当前阈值下没有结果"; $("#search-empty p").textContent = "可以降低相似度下限后再查看。";}
   } else {
     $("#search-grid").hidden = true; $("#search-compare").hidden = false; $("#search-empty").hidden = true;
@@ -248,7 +252,16 @@ function renderSearch() {
       if (!rows.length) container.append(node("p", "muted", "该阈值下没有结果。"));
     }
     $("#search-summary").textContent = `检索 ${lastSearch.searched} 张 · 双阈值对比`;
+    renderSearchWarnings();
   }
+}
+function renderSearchWarnings() {
+  const failures = Object.entries(lastSearch.failures || {});
+  const notice = $("#search-notice");
+  notice.hidden = false;
+  notice.textContent = failures.length
+    ? `以下 ${failures.length} 张未入库：` + failures.map(([name, reason]) => `${name}：${reason}`).join("；")
+    : "结果按模型相似度排序；题材相似不代表同一张图片。查询图片不会自动加入素材库。";
 }
 $("#search-sim").addEventListener("input", renderSearch);
 $("#search-left-sim").addEventListener("input", renderSearch);
@@ -299,11 +312,21 @@ function renderGroupList(container, groups, allowCleanup = true) {
   }
   more.addEventListener("click", append); append();
 }
-function summaryText(result) {return `${result.total} 张素材 · ${result.groups.length} 个候选组 · ${result.singletons.length} 张未归组`;}
+function summaryText(result) {return `${result.total} 张参与分析 · ${result.groups.length} 个候选组 · ${result.singletons.length} 张未归组 · ${Object.keys(result.skipped || {}).length} 张跳过`;}
+function skippedDetails(result) {
+  const details = node("details", "evidence");
+  const entries = Object.entries(result.skipped || {});
+  details.hidden = !entries.length;
+  details.append(node("summary", "", `查看 ${entries.length} 张未参与分析的图片及原因`));
+  entries.forEach(([name, reason]) => details.append(node("p", "", `${name}：${reason}`)));
+  return details;
+}
 async function runGroups(parameters) {
   const result = await task("/api/groups", parameters, "正在检查组内相似关系…");
+  state.groups = result;
+  await refreshLibrary();
   $("#group-summary").textContent = summaryText(result);
-  $("#group-list").replaceChildren(); renderGroupList($("#group-list"), result.groups); $("#group-empty").hidden = result.groups.length > 0;
+  $("#group-list").replaceChildren(skippedDetails(result)); renderGroupList($("#group-list"), result.groups); $("#group-empty").hidden = result.groups.length > 0;
   if (!result.groups.length) {$("#group-empty h3").textContent = "当前条件下没有发现重复组"; $("#group-empty p").textContent = "可以对比其他阈值，或导入已知重复的测试图片。";}
   return result;
 }
@@ -327,9 +350,10 @@ document.querySelectorAll("[data-mode]").forEach(button => button.addEventListen
 }));
 $("#compare-run").addEventListener("click", () => guarded("正在用两套条件比较同一素材库…", async () => {
   const result = await task("/api/compare", {left: parameters("left"), right: parameters("right")}, "正在生成并排对比结果…");
+  await refreshLibrary();
   for (const side of ["left", "right"]) {
     const data = result[side], container = $("#compare-" + side);
-    container.replaceChildren(node("p", "result-summary", summaryText(data))); renderGroupList(container, data.groups, false);
+    container.replaceChildren(node("p", "result-summary", summaryText(data)), skippedDetails(data)); renderGroupList(container, data.groups, false);
     if (!data.groups.length) container.append(node("p", "muted", "这套条件下没有候选重复组。"));
   }
 }));
@@ -344,7 +368,7 @@ $("#import-files").addEventListener("change", event => {
 function renderImports() {
   $("#import-list").replaceChildren(...state.imports.map(item => {
     const row = node("div", "import-row" + (item.error ? " error" : ""));
-    row.append(node("span", "", item.file.name), node("span", "", item.state)); row.title = item.error || item.name || item.file.name; return row;
+    row.append(node("span", "", item.file.name), node("span", "", item.error ? `${item.state}：${item.error}` : item.state)); row.title = item.error || item.name || item.file.name; return row;
   }));
 }
 $("#import-start").addEventListener("click", () => guarded("正在导入图片…", async () => {

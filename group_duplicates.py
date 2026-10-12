@@ -50,25 +50,33 @@ def complete_groups(names, matches):
     return groups
 
 
-def generate_groups(library=LIBRARY, index_file=INDEX_FILE, similarity=0.94, max_distance=6, write_report=True):
+def generate_groups(library=LIBRARY, index_file=INDEX_FILE, similarity=0.94, max_distance=6, write_report=True, skip_invalid=False):
     if not (-1 <= similarity <= 1) or not (0 <= max_distance <= 64):
         raise ValueError("相似度阈值须在 -1～1，哈希距离须在 0～64。")
     if not library.is_dir() or not index_file.is_file():
         raise RuntimeError("请先准备素材并执行 python incremental_search.py update")
     records, vectors = read_index(index_file)
-    info = {}
+    info, skipped = {}, {}
     # 索引必须与当前素材一致，避免对过期向量分组。
     disk_names = {p.name for p in library.iterdir() if p.is_file() and p.suffix.lower() in EXTENSIONS}
-    if disk_names != set(records):
+    if disk_names != set(records) and not skip_invalid:
         raise RuntimeError("素材与成功入库记录不一致。请先 update 并处理失败图片。")
+    for name in disk_names - set(records):
+        skipped[name] = "尚未成功建立索引，请更新索引并查看失败原因"
     for name in sorted(records):
         path = library / name
-        digest = fingerprint(path)
-        if digest != records[name]["sha256"]:
-            raise RuntimeError(f"图片已变化：{name}。请先运行 update。")
-        info[name] = {**inspect_image(path), "sha256": digest}
-        if fingerprint(path) != digest:
-            raise RuntimeError(f"图片在扫描时变化：{name}，请重试。")
+        try:
+            digest = fingerprint(path)
+            if digest != records[name]["sha256"]:
+                raise RuntimeError(f"图片已变化：{name}。请先运行 update。")
+            details = {**inspect_image(path), "sha256": digest}
+            if fingerprint(path) != digest:
+                raise RuntimeError(f"图片在扫描时变化：{name}，请重试。")
+            info[name] = details
+        except (OSError, ValueError, RuntimeError) as error:
+            if not skip_invalid:
+                raise
+            skipped[name] = str(error)
 
     # 先按文件哈希形成不可拆分的完全重复组。
     exact_buckets = {}
@@ -129,7 +137,7 @@ def generate_groups(library=LIBRARY, index_file=INDEX_FILE, similarity=0.94, max
         "thresholds": {"cosine": similarity, "dhash_distance": max_distance},
         "notice": "实验阈值，结果待人工核对；不执行删除。相似标签仅指向量达到阈值而哈希未通过。",
         "strategy": "先合并完全重复文件，再按文件名顺序入组，组内所有图片对须通过判定",
-        "images": info, "groups": groups, "singletons": singles,
+        "images": info, "groups": groups, "singletons": singles, "skipped": skipped,
         "similar_pairs_not_merged": similar_pairs,
         "similar_pair_count": similar_count,
     }

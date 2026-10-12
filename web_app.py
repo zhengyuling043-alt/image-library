@@ -159,7 +159,17 @@ class LibraryApp:
                 stream.write(data)
             return {"name": path.name, "status": "pending"}
 
+    def sync_index(self):
+        """搜索、分组前同步变化；未变化时不重新编码。"""
+        records, _ = read_index(self.index)
+        snapshot = self.snapshot()
+        names = {item["name"] for item in snapshot["items"]}
+        if snapshot["pending"] or names != set(records):
+            return update_index(self.library, self.index, self.encoder)
+        return {"failures": {}, "ready": len(records)}
+
     def query(self, data):
+        sync = self.sync_index()
         records, vectors = read_index(self.index)
         if not records:
             raise ValueError("索引为空，请先导入图片并更新索引")
@@ -177,7 +187,8 @@ class LibraryApp:
             results.append({"name": name, "score": float(np.clip(vectors[name] @ vector, -1, 1))})
         results.sort(key=lambda item: (-item["score"], item["name"]))
         # 返回全量得分供前端做阈值过滤与双阈值对比，一次编码多次复用。
-        return {"results": results, "searched": len(results), "skipped": skipped}
+        return {"results": results, "searched": len(results), "skipped": skipped,
+                "failures": sync["failures"]}
 
     def sign_review(self, review):
         encoded = json.dumps(review, sort_keys=True, ensure_ascii=False).encode("utf-8")
@@ -264,18 +275,29 @@ class LibraryApp:
             raise
         return {"restored": names}
 
-    def groups(self, parameters):
+    def groups(self, parameters, sync=True):
         cosine = float(parameters.get("similarity", .94))
         distance = int(parameters.get("distance", 6))
         if not np.isfinite(cosine) or not 0 <= cosine <= 1 or not 0 <= distance <= 64:
             raise ValueError("相似度应在 0～1，哈希距离应在 0～64")
-        report = generate_groups(self.library, self.index, cosine, distance, write_report=False)
+        update = self.sync_index() if sync else {"failures": {}}
+        if not self.index.exists():
+            raise ValueError("素材库为空，请先导入图片")
+        report = generate_groups(self.library, self.index, cosine, distance, write_report=False, skip_invalid=True)
         for group in report["groups"]:
             review = {"thresholds": report["thresholds"],
                       "hashes": {n: report["images"][n]["sha256"] for n in group["members"]}}
             group["review"], group["signature"] = review, self.sign_review(review)
         return {"groups": report["groups"], "singletons": report["singletons"],
-                "thresholds": report["thresholds"], "total": len(report["images"])}
+                "thresholds": report["thresholds"], "total": len(report["images"]),
+                "skipped": {**report["skipped"], **update["failures"]}}
+
+    def compare(self, body):
+        update = self.sync_index()
+        result = {side: self.groups(body[side], sync=False) for side in ("left", "right")}
+        for report in result.values():
+            report["skipped"].update(update["failures"])
+        return result
 
     def export(self, names):
         if not isinstance(names, list) or not names:
@@ -369,7 +391,7 @@ def make_handler(app):
                 if self.path == "/api/groups":
                     return self.respond(app.submit("groups", lambda: app.groups(body)))
                 if self.path == "/api/compare":
-                    return self.respond(app.submit("compare", lambda: {"left": app.groups(body["left"]), "right": app.groups(body["right"])}))
+                    return self.respond(app.submit("compare", lambda: app.compare(body)))
                 if self.path == "/api/cleanup":
                     return self.respond(app.submit("cleanup", lambda: app.cleanup(body)))
                 if self.path == "/api/restore":
