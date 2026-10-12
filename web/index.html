@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="app-token" content="__TOKEN__">
+  <meta name="theme-color" content="#f5dfb7">
+  <title>拾图 · 轻松熊的素材小屋</title><link rel="stylesheet" href="/style.css"><link rel="stylesheet" href="/rilakkuma.css?v=official-2">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+<aside class="sidebar">
+  <a class="brand" href="/" aria-label="拾图，轻松熊的素材小屋"><img class="official-brand" src="/characters/rilakkuma.webp" alt=""><span>拾图<small>RILAKKUMA ROOM</small></span></a>
+  <div class="workspace"><span class="workspace-icon">图</span><div>我的素材空间<small>本地图片库</small></div><span class="online"></span></div>
+  <p class="nav-label">工作空间</p>
+  <nav aria-label="主导航">
+    <button class="nav-item active" data-page="library"><span>▦</span>素材库<span id="nav-count" class="nav-count">—</span></button>
+    <button class="nav-item" data-page="search"><span>⌕</span>以图搜图</button>
+    <button class="nav-item" data-page="groups"><span>▱</span>重复组与对比</button>
+  </nav>
+  <div class="sidebar-note"><span class="note-symbol" aria-hidden="true">☕</span><b>休息一下，<br>灵感慢慢收集。</b><p>和轻松熊一起，<br>整理属于你的日常小美好。</p><img class="official-chick" src="/characters/kiiroitori.webp" alt=""></div>
+  <div class="sidebar-bottom"><span class="online"></span> 本地运行 <span class="version">v0.1</span></div>
+</aside>
+<div class="app">
+  <header class="topbar"><span>工作空间 <span class="crumb">/</span> <b id="breadcrumb">素材库</b></span><span class="local-badge">◉ 私有 · 本地素材</span></header>
+  <main>
+    <section class="page active" id="page-library">
+      <div class="page-heading cozy-hero"><div><p class="eyebrow">RILAKKUMA · LITTLE HAPPY COLLECTION</p><h1>慢慢来，把喜欢的都收藏<span>。</span></h1><p class="subtitle">一张图片，一点小确幸。欢迎来到轻松熊的素材小屋。</p><span class="hero-sticker">今日份快乐，已收好 ♡</span></div><img class="hero-family" src="/characters/group.webp" alt="轻松熊、小棕熊、小白熊和小黄鸡一起坐着"><button class="primary" id="import-open">＋ 收藏新图片</button></div>
+      <div class="stats"><div class="stat"><span>素材总数</span><strong id="stat-total">—</strong><small>张图片</small></div><div class="stat"><span>已建立索引</span><strong id="stat-ready">—</strong><small>可用于搜索与分组</small></div><div class="stat"><span>待处理素材</span><strong id="stat-pending">—</strong><small>新增、变化或读取失败</small></div><div class="stat stat-tip"><span class="tip-icon">↗</span><b>用一张图，找到更多。</b><p>上传参考图，按相似程度寻找素材。</p><button class="text-button" data-goto="search">开始以图搜图 →</button></div></div>
+      <div class="collection-heading"><h2>全部素材 <span id="collection-count">0</span></h2><button class="secondary" id="update-index">↻ 更新索引</button></div>
+      <div class="toolbar"><input id="filename-filter" type="search" placeholder="搜索文件名…" aria-label="搜索文件名"><label class="toggle"><input type="checkbox" id="collapse-groups">按重复组合并</label><select id="sort-order" aria-label="排序方式"><option value="name">文件名排序</option><option value="pixels">分辨率优先</option><option value="recent">最近修改优先</option></select><button class="secondary" id="select-all">全选当前结果</button><button class="secondary" id="export" disabled>导出清单 (0)</button></div>
+      <div class="context-note" id="collapse-note" hidden>合并视图使用默认阈值 0.94 / 6，仅改变显示方式。点击图片可查看组内版本。</div>
+      <div id="library-grid" class="image-grid"></div><div id="library-empty" class="empty" hidden><span>▧</span><h3>这里还没有素材</h3><p>导入一些 JPG、PNG、WebP 或 BMP 图片，开始整理。</p></div>
+      <div class="library-actions"><button class="secondary" id="load-more" hidden>加载更多素材</button><button class="secondary" id="restore-last" hidden>恢复最近一次清理</button></div>
+      <footer class="grid-footer"><span id="grid-summary"></span><span>图片保存在你的电脑上 · <a href="https://www.san-x.co.jp/zh/characters/rilakkuma/" target="_blank" rel="noopener noreferrer">角色插画 © SAN-X</a></span></footer>
+    </section>
+
+    <section class="page" id="page-search" hidden>
+      <div class="page-heading"><div><p class="eyebrow">FIND YOUR NEXT REFERENCE</p><h1>以图为线索，找到相似<span>。</span></h1><p class="subtitle">选择一张参考图片，在素材库中寻找它的相似版本。</p></div></div>
+      <div class="search-layout"><aside class="query-panel"><h2>查询图片</h2><label class="drop-zone" id="query-drop"><input id="query-file" type="file" accept="image/jpeg,image/png,image/webp,image/bmp" hidden><span id="query-placeholder"><span class="upload-symbol">↥</span><b>点击选择或拖入图片</b><small>JPG / PNG / WebP / BMP · 最大 20 MB</small></span><img id="query-preview" alt="查询图片预览" hidden></label><p id="query-name" class="file-label">尚未选择图片</p><button class="primary full" id="search-submit" disabled>⌕ 查找相似图片</button><label class="sim-row">相似度下限<input id="search-sim" type="number" min="0" max="1" step="0.01" value="0"></label><div class="segmented" id="search-modes"><button class="active" data-search-mode="single">单列结果</button><button data-search-mode="compare">双阈值对比</button></div><div id="search-thresholds" hidden><div class="compare-settings"><span class="option-tag">方案 A</span><label>相似度 ≥<input id="search-left-sim" type="number" min="0" max="1" step="0.01" value="0.90"></label></div><div class="compare-settings"><span class="option-tag alt">方案 B</span><label>相似度 ≥<input id="search-right-sim" type="number" min="0" max="1" step="0.01" value="0.80"></label></div></div><p class="fine-print">查询图仅用于本次搜索，不会自动加入素材库。分数表示相似程度，不是重复概率；阈值过滤在本地进行，不重复调用模型。</p></aside><div class="search-results"><div class="collection-heading"><h2>相似素材</h2><span id="search-summary" class="muted">最多展示 20 张</span></div><div id="search-grid" class="image-grid search-grid"></div><div id="search-compare" class="compare-columns" hidden><div><h2>方案 A</h2><div id="search-compare-left" class="compare-body"><p class="muted">等待搜索</p></div></div><div><h2>方案 B</h2><div id="search-compare-right" class="compare-body"><p class="muted">等待搜索</p></div></div></div><div class="empty" id="search-empty"><span>⌕</span><h3>从一张图片开始</h3><p>选择左侧的参考图，查看按相似度排列的结果。</p></div></div></div>
+    </section>
+
+    <section class="page" id="page-groups" hidden>
+      <div class="page-heading"><div><p class="eyebrow">LESS REPETITION, MORE CLARITY</p><h1>相似的版本，放在一起<span>。</span></h1><p class="subtitle">检查候选重复组，选择保留版本。清理的图片移入本地回收区，可恢复。</p></div></div>
+      <div class="segmented"><button class="active" data-mode="groups">重复组查看</button><button data-mode="compare">两套阈值对比</button></div>
+      <div id="group-view"><div class="parameter-panel"><div><b>判定条件</b><p>完全重复按文件内容识别；近重复需同时满足下方两个条件。</p></div><label>相似度 ≥<input id="group-sim" type="number" min="0" max="1" step="0.01" value="0.94"></label><label>哈希距离 ≤<input id="group-dist" type="number" min="0" max="64" step="1" value="6"></label><button class="primary" id="group-run">分析重复组</button></div><div class="context-note">相似度越高、哈希距离越小，规则越严格。推荐保留仅按像素数量，需结合图片内容人工判断。</div><div id="group-summary" class="result-summary"></div><div id="group-list"></div><div class="empty" id="group-empty"><span>▱</span><h3>看看哪些图片属于同一组</h3><p>点击“分析重复组”，查看已有索引中的候选版本。</p></div></div>
+      <div id="compare-view" hidden><div class="compare-controls"><div class="compare-settings"><span class="option-tag">方案 A</span><label>相似度 ≥<input id="left-sim" type="number" min="0" max="1" step="0.01" value="0.94"></label><label>哈希距离 ≤<input id="left-dist" type="number" min="0" max="64" value="6"></label></div><div class="compare-settings"><span class="option-tag alt">方案 B</span><label>相似度 ≥<input id="right-sim" type="number" min="0" max="1" step="0.01" value="0.90"></label><label>哈希距离 ≤<input id="right-dist" type="number" min="0" max="64" value="18"></label></div><button class="primary" id="compare-run">并排对比</button></div><div class="context-note">方案 B 来自小样本评测的候选阈值，仅供对比。结果多不等于判断更准确；两边使用同一素材库。</div><div class="compare-columns"><div><h2>方案 A <span class="muted">默认条件</span></h2><div id="compare-left" class="compare-body"><p class="muted">等待运行对比</p></div></div><div><h2>方案 B <span class="muted">候选条件</span></h2><div id="compare-right" class="compare-body"><p class="muted">等待运行对比</p></div></div></div></div>
+    </section>
+  </main>
+</div>
+<div id="task-banner" class="task-banner" role="status" hidden><span class="spinner"></span><span id="task-text">正在处理…</span></div>
+<div id="toast" class="toast" role="status" hidden></div>
+<dialog id="image-dialog"><div class="dialog-top"><h2 id="detail-title">图片详情</h2><button class="icon-button" id="detail-close" aria-label="关闭图片详情">×</button></div><div id="detail-content"></div></dialog>
+<dialog id="import-dialog"><div class="dialog-top"><div><h2>导入图片</h2><p class="muted">批量选择后自动建立索引，同名图片会另存为新文件。</p></div><button class="icon-button" id="import-close" aria-label="关闭导入窗口">×</button></div><label class="import-picker"><input id="import-files" type="file" accept="image/jpeg,image/png,image/webp,image/bmp" multiple hidden><span class="upload-symbol">＋</span><b>选择图片 · 支持多选</b><small>每张最大 20 MB</small></label><div id="import-list" class="import-list"></div><button id="import-start" class="primary full" disabled>开始导入</button></dialog>
+</body></html>
