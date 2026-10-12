@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 520 300">
+<g stroke="#293e37" stroke-width="6" stroke-linecap="round" stroke-linejoin="round">
+<!-- 小花与柔和色块 -->
+<g stroke-width="3" fill="#d4e6bd"><path d="M34 44C12 19 8 53 29 51C5 68 40 78 38 55C57 79 69 44 45 48C64 27 30 22 34 44Z"/><path d="M459 35C441 16 437 42 453 42C435 56 461 64 461 47C476 65 486 39 468 40C482 24 457 20 459 35Z"/></g>
+<g stroke="none"><circle cx="275" cy="26" r="7" fill="#f6d5c1"/><circle cx="502" cy="108" r="9" fill="#d2eaf0"/><circle cx="102" cy="15" r="7" fill="#d4e6bd"/><circle cx="336" cy="74" r="6" fill="#f6d5c1"/></g>
+<!-- 轻松熊：赭黄色身体、黄色耳心、白色口鼻 -->
+<g fill="#c48710">
+<path d="M80 170C59 194 57 243 69 259L48 276Q44 295 70 291L107 276Q134 284 159 273L180 284Q203 286 202 266L181 245Q184 195 164 172Z"/>
+<ellipse cx="123" cy="227" rx="36" ry="44" fill="#fffdf3" stroke="none"/>
+<ellipse cx="65" cy="193" rx="17" ry="36" transform="rotate(15 65 193)"/><ellipse cx="180" cy="198" rx="16" ry="33" transform="rotate(-25 180 198)"/>
+<circle cx="52" cy="70" r="32"/><circle cx="190" cy="71" r="32"/>
+<ellipse cx="46" cy="81" rx="21" ry="22" fill="#fbd51a"/><ellipse cx="197" cy="82" rx="21" ry="22" fill="#fbd51a"/>
+<path d="M28 126C23 70 62 53 119 51C175 49 214 81 215 128C216 169 187 192 124 193C64 194 30 175 28 126Z"/>
+<ellipse cx="82" cy="127" rx="10" ry="11" fill="#293e37" stroke="none"/><ellipse cx="166" cy="130" rx="10" ry="11" fill="#293e37" stroke="none"/>
+<ellipse cx="124" cy="148" rx="25" ry="21" fill="#fffdf3" stroke="none"/><ellipse cx="124" cy="141" rx="7" ry="6" fill="#293e37" stroke="none"/><path d="M124 145Q123 152 111 155M124 146Q130 155 137 158" fill="none"/>
+</g>
+<!-- 小棕熊 -->
+<g fill="#aa7446">
+<path d="M244 205Q218 220 225 264Q215 287 237 287L250 276Q271 282 288 274Q308 291 317 275L306 252Q315 219 294 206Z"/>
+<path d="M253 225Q266 216 282 225L280 248L270 245L261 251L249 246Z" fill="#fffaf0" stroke="none"/>
+<circle cx="226" cy="150" r="23"/><circle cx="307" cy="148" r="23"/>
+<ellipse cx="266" cy="182" rx="66" ry="54"/>
+<circle cx="237" cy="183" r="7" fill="#293e37" stroke="none"/><circle cx="294" cy="180" r="7" fill="#293e37" stroke="none"/>
+<ellipse cx="266" cy="198" rx="18" ry="16" fill="#fffaf0" stroke="none"/><path d="M262 192L269 192M266 194L260 204M266 195L273 201" fill="none" stroke-width="5"/>
+</g>
+<!-- 小白熊：粉色耳心 -->
+<g fill="#fff0c5">
+<path d="M369 180Q344 210 355 257Q343 282 366 281L380 266Q403 274 424 265Q443 282 454 270L445 251Q454 211 431 183Z"/>
+<ellipse cx="448" cy="239" rx="15" ry="20"/>
+<circle cx="348" cy="100" r="28"/><circle cx="462" cy="96" r="28"/>
+<ellipse cx="343" cy="108" rx="18" ry="20" fill="#eaa8bc"/><ellipse cx="467" cy="106" rx="18" ry="20" fill="#eaa8bc"/>
+<path d="M327 151C323 105 357 88 401 88C447 86 481 111 481 153C482 192 457 211 407 212C356 210 329 190 327 151Z"/>
+<ellipse cx="371" cy="157" rx="9" ry="10" fill="#293e37" stroke="none"/><ellipse cx="440" cy="162" rx="9" ry="10" fill="#293e37" stroke="none"/>
+<ellipse cx="405" cy="178" rx="23" ry="18" fill="#fffefa" stroke="none"/><ellipse cx="405" cy="172" rx="6" ry="5" fill="#293e37" stroke="none"/><path d="M405 176L396 183M405 177L414 187" fill="none" stroke-width="5"/>
+</g>
+<!-- 小黄鸡 -->
+<g fill="#fbd800"><path d="M144 257Q147 217 176 214Q206 214 211 250Q229 263 212 266Q209 292 178 292Q144 292 140 272Q128 270 144 257Z"/><path d="M174 214L168 204M179 214L186 207" fill="none" stroke-width="4"/><circle cx="161" cy="245" r="5" fill="#293e37" stroke="none"/><circle cx="195" cy="245" r="5" fill="#293e37" stroke="none"/><ellipse cx="178" cy="256" rx="13" ry="9" fill="#eaa31a" stroke-width="4"/><path d="M174 254L174 256M183 254L183 256M153 281L158 286L160 279M194 280L198 286L202 280" fill="none" stroke-width="3"/></g>
+</g></svg>

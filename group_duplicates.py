@@ -1,7 +1,7 @@
 """近重复分组原型：仅生成待人工核对的结果，不删除图片。"""
 import argparse
 import json
-from itertools import combinations
+from itertools import combinations, islice
 
 import numpy as np
 from PIL import Image, ImageOps
@@ -75,17 +75,36 @@ def generate_groups(library=LIBRARY, index_file=INDEX_FILE, similarity=0.94, max
     for name in sorted(info):
         exact_buckets.setdefault(info[name]["sha256"], []).append(name)
     units = {members[0]: members for members in exact_buckets.values()}
-    pair_results = {}
+    names = sorted(info)
+    positions = {name: i for i, name in enumerate(names)}
+    # 分块计算余弦，只保存布尔邻接表，不为数百万图片对创建 Python 字典。
+    adjacent = np.eye(len(names), dtype=bool)
+    matrix = np.stack([vectors[n] for n in names]) if names else np.empty((0, 512), dtype=np.float32)
+    similar_pairs, similar_count = [], 0
+    for start in range(0, len(names), 128):
+        scores = matrix[start:start + 128] @ matrix.T
+        for offset, row in enumerate(scores):
+            i = start + offset
+            for j in np.flatnonzero(row[i + 1:] >= similarity) + i + 1:
+                a, b = names[i], names[j]
+                distance = (info[a]["dhash"] ^ info[b]["dhash"]).bit_count()
+                if info[a]["sha256"] == info[b]["sha256"] or distance <= max_distance:
+                    adjacent[i, j] = adjacent[j, i] = True
+                else:
+                    similar_count += 1
+                    if len(similar_pairs) < 200:
+                        similar_pairs.append(classify_pair(a, b, info, vectors, similarity, max_distance))
+    # 完全重复判定不依赖向量分数（包括浮点舍入到 1 以下的情况）。
+    for members in units.values():
+        ids = [positions[name] for name in members]
+        adjacent[np.ix_(ids, ids)] = True
 
     def pair(a, b):
-        key = tuple(sorted((a, b)))
-        if key not in pair_results:
-            pair_results[key] = classify_pair(*key, info, vectors, similarity, max_distance)
-        return pair_results[key]
+        return classify_pair(a, b, info, vectors, similarity, max_distance)
 
     # 完全重复组作为整体入组，仍检查不同组之间全部图片对。
     def matches(a, b):
-        return all(pair(x, y)["category"] in {"exact", "near"}
+        return all(adjacent[positions[x], positions[y]]
                    for x in units[a] for y in units[b])
 
     grouped_units = complete_groups(units, matches)
@@ -95,31 +114,30 @@ def generate_groups(library=LIBRARY, index_file=INDEX_FILE, similarity=0.94, max
         if len(members) == 1:
             singles.extend(members)
             continue
-        evidence = [pair(a, b) for a, b in combinations(members, 2)]
+        evidence = [pair(a, b) for a, b in islice(combinations(members, 2), 200)]
         # 仅按像素数量推荐，不声称分辨率最高就一定质量最好。
         keeper = min(members, key=lambda n: (-info[n]["width"] * info[n]["height"], n))
         groups.append({"id": len(groups) + 1,
                        "category": "exact" if len(unit_group) == 1 else "near",
                        "members": members, "suggested_keep": keeper,
                        "keep_reason": "像素数量最多；并列按文件名排序，需人工确认",
-                       "pairs": evidence})
+                       "pairs": evidence,
+                       "pair_count": len(members) * (len(members) - 1) // 2})
 
     # 输出所有高相似度但未通过近重复规则的图片对，帮助排查误判。
-    similar_pairs = []
-    for a, b in combinations(sorted(info), 2):
-        result = pair(a, b)
-        if result["category"] == "similar":
-            similar_pairs.append(result)
     report = {
         "thresholds": {"cosine": similarity, "dhash_distance": max_distance},
         "notice": "实验阈值，结果待人工核对；不执行删除。相似标签仅指向量达到阈值而哈希未通过。",
         "strategy": "先合并完全重复文件，再按文件名顺序入组，组内所有图片对须通过判定",
         "images": info, "groups": groups, "singletons": singles,
         "similar_pairs_not_merged": similar_pairs,
+        "similar_pair_count": similar_count,
     }
     output = index_file.parent / "duplicate_groups.json"
     if write_report:
         output.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    if not write_report:
+        return report
     print(f"共检查 {len(info)} 张图片，发现 {len(groups)} 个候选重复组，{len(singles)} 张未归组。")
     for group in groups:
         label = "完全重复" if group["category"] == "exact" else "含近重复候选"

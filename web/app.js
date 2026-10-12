@@ -1,7 +1,7 @@
 "use strict";
 const $ = (selector) => document.querySelector(selector);
 const token = $('meta[name="app-token"]').content;
-const state = {items: [], selected: new Set(), groups: null, query: null, queryURL: null, busy: false, imports: []};
+const state = {items: [], selected: new Set(), groups: null, query: null, queryURL: null, busy: false, imports: [], visibleLimit: 60, recoverable: []};
 const labels = {library: "素材库", search: "以图搜图", groups: "重复组与对比"};
 let toastTimer;
 
@@ -115,24 +115,33 @@ function visibleItems() {
 }
 function renderLibrary() {
   const {items, groups} = visibleItems();
-  $("#library-grid").replaceChildren(...items.map(item => card(item, {selectable: true, group: groups.get(item.name)})));
+  const visible = items.slice(0, state.visibleLimit);
+  $("#library-grid").replaceChildren(...visible.map(item => card(item, {selectable: true, group: groups.get(item.name)})));
+  $("#load-more").hidden = visible.length >= items.length;
   $("#library-empty").hidden = items.length > 0;
   $("#library-empty h3").textContent = state.items.length ? "没有匹配的素材" : "这里还没有素材";
   $("#library-empty p").textContent = state.items.length ? "试试其他文件名，或清空搜索条件。" : "导入一些图片，开始整理。";
-  $("#grid-summary").textContent = `显示 ${items.length} 项 · 共 ${state.items.length} 张素材`;
+  $("#grid-summary").textContent = `显示 ${visible.length} / ${items.length} 项 · 共 ${state.items.length} 张素材`;
   $("#collapse-note").hidden = !$("#collapse-groups").checked;
   updateSelection();
 }
 async function refreshLibrary() {
   const data = await api("/api/library"); state.items = data.items;
+  state.recoverable = data.recoverable || [];
+  $("#restore-last").hidden = !state.recoverable.length;
   const names = new Set(data.items.map(item => item.name));
   state.selected = new Set([...state.selected].filter(name => names.has(name)));
   $("#stat-total").textContent = data.total; $("#stat-ready").textContent = data.ready; $("#stat-pending").textContent = data.pending;
   $("#collection-count").textContent = data.total; $("#nav-count").textContent = data.total;
   renderLibrary(); return data;
 }
-$("#filename-filter").addEventListener("input", renderLibrary);
-$("#sort-order").addEventListener("change", renderLibrary);
+$("#filename-filter").addEventListener("input", () => {state.visibleLimit = 60; renderLibrary();});
+$("#sort-order").addEventListener("change", () => {state.visibleLimit = 60; renderLibrary();});
+$("#load-more").addEventListener("click", () => {state.visibleLimit += 60; renderLibrary();});
+$("#restore-last").addEventListener("click", () => guarded("正在恢复最近一次清理…", async () => {
+  const result = await task("/api/restore", {batch: state.recoverable[0].id}, "正在恢复图片与索引…");
+  invalidateResults(); await refreshLibrary(); notify(`已恢复 ${result.restored.length} 张图片。`);
+}));
 $("#select-all").addEventListener("click", () => {
   const names = visibleItems().items.map(item => item.name);
   const all = names.every(name => state.selected.has(name));
@@ -152,6 +161,7 @@ function invalidateResults() {
   $("#compare-left").replaceChildren(node("p", "muted", "素材已更新，请重新对比。")); $("#compare-right").replaceChildren(node("p", "muted", "素材已更新，请重新对比。"));
   $("#search-grid").replaceChildren(); $("#search-empty").hidden = false; $("#search-summary").textContent = "最多展示 20 张";
   $("#search-compare-left").replaceChildren(node("p", "muted", "素材已更新，请重新对比。")); $("#search-compare-right").replaceChildren(node("p", "muted", "素材已更新，请重新对比。"));
+  resetSearchView();
 }
 $("#update-index").addEventListener("click", () => guarded("正在检查素材变化，首次处理可能需要稍候…", async () => {
   const result = await task("/api/update", {}, "正在更新索引，请保持页面开启…");
@@ -189,6 +199,7 @@ function chooseQuery(file) {
   if (file.size > 20 * 1024 * 1024) return notify("单张图片不能超过 20 MB", true);
   state.query = file; if (state.queryURL) URL.revokeObjectURL(state.queryURL); state.queryURL = URL.createObjectURL(file);
   lastSearch = null;
+  resetSearchView();
   $("#query-preview").src = state.queryURL; $("#query-preview").hidden = false; $("#query-placeholder").hidden = true;
   $("#query-name").textContent = file.name; $("#search-submit").disabled = false;
   $("#search-grid").replaceChildren(); $("#search-empty").hidden = false; $("#search-summary").textContent = "点击查找以获取新结果";
@@ -205,24 +216,35 @@ $("#search-submit").addEventListener("click", () => guarded("正在查找相似�
 }));
 
 let lastSearch = null, searchMode = "single";
+function resetSearchView() {
+  $("#search-grid").replaceChildren(); $("#search-grid").hidden = searchMode !== "single";
+  $("#search-compare").hidden = true;
+  $("#search-compare-left").replaceChildren(); $("#search-compare-right").replaceChildren();
+  $("#search-empty").hidden = false;
+  $("#search-empty h3").textContent = "从一张图片开始";
+  $("#search-empty p").textContent = "选择参考图并点击查找，获取当前图片的结果。";
+}
 function searchCard(row) {const item = state.items.find(i => i.name === row.name); return item ? card(item, {score: row.score}) : node("span");}
 function clampThreshold(value) {return Math.min(1, Math.max(0, Number(value) || 0));}
 function renderSearch() {
-  if (!lastSearch) return;
+  if (!lastSearch) return resetSearchView();
   if (searchMode === "single") {
     const threshold = clampThreshold($("#search-sim").value);
-    const rows = lastSearch.results.filter(row => row.score >= threshold).slice(0, 20);
+    const matches = lastSearch.results.filter(row => row.score >= threshold);
+    const rows = matches.slice(0, 20);
     $("#search-grid").hidden = false; $("#search-compare").hidden = true;
     $("#search-grid").replaceChildren(...rows.map(searchCard));
     $("#search-empty").hidden = rows.length > 0;
-    $("#search-summary").textContent = `检索 ${lastSearch.searched} 张 · 显示 ${rows.length} 张` + (threshold ? ` · 相似度 ≥ ${threshold}` : "");
+    $("#search-summary").textContent = `检索 ${lastSearch.searched} 张 · 命中 ${matches.length} 张 · 展示前 ${rows.length} 张`;
+    if (!rows.length) {$("#search-empty h3").textContent = "当前阈值下没有结果"; $("#search-empty p").textContent = "可以降低相似度下限后再查看。";}
   } else {
     $("#search-grid").hidden = true; $("#search-compare").hidden = false; $("#search-empty").hidden = true;
     for (const side of ["left", "right"]) {
       const threshold = clampThreshold($("#search-" + side + "-sim").value);
-      const rows = lastSearch.results.filter(row => row.score >= threshold).slice(0, 20);
+      const matches = lastSearch.results.filter(row => row.score >= threshold);
+      const rows = matches.slice(0, 20);
       const container = $("#search-compare-" + side);
-      container.replaceChildren(node("p", "result-summary", `相似度 ≥ ${threshold} · ${rows.length} 张`), ...rows.map(searchCard));
+      container.replaceChildren(node("p", "result-summary", `相似度 ≥ ${threshold} · 命中 ${matches.length} 张 · 展示前 ${rows.length} 张`), ...rows.map(searchCard));
       if (!rows.length) container.append(node("p", "muted", "该阈值下没有结果。"));
     }
     $("#search-summary").textContent = `检索 ${lastSearch.searched} 张 · 双阈值对比`;
@@ -243,38 +265,58 @@ function parameters(prefix) {
   if (!sim.reportValidity() || !dist.reportValidity() || sim.value === "" || dist.value === "") throw new Error("请填写有效的阈值");
   return {similarity: Number(sim.value), distance: Number(dist.value)};
 }
-function groupCard(group) {
+function groupCard(group, allowCleanup = true) {
   const box = node("article", "group-card"), header = node("div", "group-header");
   header.append(node("h3", "", `组 ${group.id} · ${group.members.length} 个版本`), node("span", "", group.category === "exact" ? "完全重复" : "含近重复候选"));
-  if (group.members.length > 1) {
+  const keeper = node("select"); keeper.setAttribute("aria-label", `组 ${group.id} 保留版本`);
+  group.members.forEach(name => {const option = node("option", "", name); option.value = name; keeper.append(option);});
+  keeper.value = group.suggested_keep;
+  if (group.members.length > 1 && allowCleanup) {
     const button = node("button", "cleanup-button", "清理其余版本");
-    button.addEventListener("click", () => cleanupGroup(group));
+    button.addEventListener("click", () => cleanupGroup(group, keeper.value));
     header.append(button);
   }
   const images = node("div", "group-images");
-  group.members.forEach(name => {const item = state.items.find(i => i.name === name); if (item) images.append(card(item, {badge: name === group.suggested_keep ? "推荐保留" : undefined}));});
+  group.members.slice(0, 20).forEach(name => {const item = state.items.find(i => i.name === name); if (item) images.append(card(item, {badge: name === group.suggested_keep ? "推荐保留" : undefined}));});
+  if (group.members.length > 20) {
+    const more = node("button", "secondary", `展开其余 ${group.members.length - 20} 个版本`);
+    more.addEventListener("click", () => {group.members.slice(20).forEach(name => {const item = state.items.find(i => i.name === name); if (item) images.append(card(item));}); more.remove();});
+    images.append(more);
+  }
   const evidence = node("details", "evidence"); evidence.append(node("summary", "", "查看判定依据"));
   group.pairs.forEach(pair => evidence.append(node("p", "", `${pair.a} ↔ ${pair.b}：${pair.category === "exact" ? "文件内容相同" : "近重复候选"}；相似度 ${pair.cosine.toFixed(4)}；哈希距离 ${pair.dhash_distance}`)));
-  box.append(header, images, node("p", "group-reason", "推荐依据：像素数量优先；同尺寸时按文件名排序。"), evidence); return box;
+  box.append(header, images, node("p", "group-reason", "推荐依据：像素数量优先；同尺寸时按文件名排序。"));
+  if (allowCleanup) {const label = node("label", "keeper-label", "本次保留："); label.append(keeper); box.append(label);}
+  if (group.pair_count > group.pairs.length) evidence.append(node("p", "", `共 ${group.pair_count} 对关系，此处展示前 ${group.pairs.length} 对依据。`));
+  box.append(evidence); return box;
+}
+function renderGroupList(container, groups, allowCleanup = true) {
+  let shown = 0;
+  const more = node("button", "secondary", "加载更多重复组");
+  function append() {
+    more.remove(); groups.slice(shown, shown + 12).forEach(group => container.append(groupCard(group, allowCleanup)));
+    shown += 12; if (shown < groups.length) container.append(more);
+  }
+  more.addEventListener("click", append); append();
 }
 function summaryText(result) {return `${result.total} 张素材 · ${result.groups.length} 个候选组 · ${result.singletons.length} 张未归组`;}
 async function runGroups(parameters) {
   const result = await task("/api/groups", parameters, "正在检查组内相似关系…");
   $("#group-summary").textContent = summaryText(result);
-  $("#group-list").replaceChildren(...result.groups.map(groupCard)); $("#group-empty").hidden = result.groups.length > 0;
+  $("#group-list").replaceChildren(); renderGroupList($("#group-list"), result.groups); $("#group-empty").hidden = result.groups.length > 0;
   if (!result.groups.length) {$("#group-empty h3").textContent = "当前条件下没有发现重复组"; $("#group-empty p").textContent = "可以对比其他阈值，或导入已知重复的测试图片。";}
   return result;
 }
-function cleanupGroup(group) {
+function cleanupGroup(group, keep) {
   if (state.busy) return notify("已有任务正在运行，请稍候");
-  const extra = group.members.filter(name => name !== group.suggested_keep);
-  const message = `将永久删除组 ${group.id} 中除推荐保留项「${group.suggested_keep}」以外的 ${extra.length} 个版本，删除后不可恢复。\n\n确定清理吗？`;
+  const extra = group.members.filter(name => name !== keep);
+  const message = `保留「${keep}」，将以下 ${extra.length} 个版本移入本地回收区，可从素材库恢复：\n\n${extra.join("\n")}\n\n确定清理吗？`;
   if (!window.confirm(message)) return;
   guarded("正在清理多余版本…", async () => {
-    const result = await task("/api/cleanup", {similarity: Number($("#group-sim").value), distance: Number($("#group-dist").value), names: extra}, "正在删除文件并同步索引…");
+    const result = await task("/api/cleanup", {review: group.review, signature: group.signature, keep, names: extra}, "正在移入回收区并同步索引…");
     invalidateResults(); await refreshLibrary();
     const rejected = result.rejected.length;
-    notify(`已删除 ${result.deleted.length} 个版本并更新索引。` + (rejected ? `${rejected} 个文件未能清理（可能已不是组内版本）。` : ""), rejected > 0);
+    notify(`已将 ${result.deleted.length} 个版本移入回收区，可在素材库恢复。`, rejected > 0);
     if (result.deleted.length) await runGroups(parameters("group"));
   });
 }
@@ -287,7 +329,7 @@ $("#compare-run").addEventListener("click", () => guarded("正在用两套条件
   const result = await task("/api/compare", {left: parameters("left"), right: parameters("right")}, "正在生成并排对比结果…");
   for (const side of ["left", "right"]) {
     const data = result[side], container = $("#compare-" + side);
-    container.replaceChildren(node("p", "result-summary", summaryText(data)), ...data.groups.map(groupCard));
+    container.replaceChildren(node("p", "result-summary", summaryText(data))); renderGroupList(container, data.groups, false);
     if (!data.groups.length) container.append(node("p", "muted", "这套条件下没有候选重复组。"));
   }
 }));
