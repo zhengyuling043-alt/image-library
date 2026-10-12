@@ -222,3 +222,5 @@ __marimo__/
 
 # 本地测试图片和生成的索引
 data/
+*.npz
+*.report.json
