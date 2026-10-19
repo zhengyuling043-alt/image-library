@@ -72,7 +72,10 @@ def persist_vector_index(index_file, records, vectors):
         handle, name = tempfile.mkstemp(dir=str(faiss_path.parent), suffix=".faiss")
         os.close(handle)
         temporary = Path(name)
-        faiss.write_index(index, str(temporary))
+        # FAISS 的 Windows FileIOWriter 不能可靠处理非 ASCII 路径。
+        # 先序列化到内存，再由 Python 写盘即可支持中文用户名与目录。
+        serialized = faiss.serialize_index(index)
+        temporary.write_bytes(serialized.tobytes())
         os.replace(str(temporary), str(faiss_path))
         names_path.write_text(json.dumps({"names": names}, ensure_ascii=False), encoding="utf-8")
     finally:

@@ -2,6 +2,7 @@
 
 import sqlite3
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 from PIL import Image, ImageOps
@@ -34,12 +35,17 @@ class MetadataStore:
         with self._connect() as connection:
             connection.executescript(SCHEMA)
 
+    @contextmanager
     def _connect(self):
         connection = sqlite3.connect(str(self.path), timeout=15)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA journal_mode=WAL")
         connection.execute("PRAGMA synchronous=NORMAL")
-        return connection
+        try:
+            yield connection
+            connection.commit()
+        finally:
+            connection.close()
 
     def sync(self, library, records, failures=None):
         """Synchronise filesystem/index state while preserving numeric IDs."""
