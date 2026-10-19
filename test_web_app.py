@@ -220,12 +220,18 @@ class WebAppTestCase(unittest.TestCase):
         req = urllib.request.Request(base_url + path, data=data, headers=headers, method=method)
         if host:
             req.add_header("Host", host)
-        try:
-            with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(req, timeout=10) as response:
-                return response.status, response.read()
-        except urllib.error.HTTPError as error:
-            with error:
-                return error.code, error.read()
+        for attempt in range(2):
+            try:
+                with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(req, timeout=10) as response:
+                    return response.status, response.read()
+            except urllib.error.HTTPError as error:
+                with error:
+                    return error.code, error.read()
+            except ConnectionAbortedError:
+                if attempt:
+                    raise
+                # Windows偶尔会重置刚关闭的本地测试短连接；仅重试一次。
+                time.sleep(0.02)
 
     def wait_job(self, base_url, token, job_id, timeout=10):
         deadline = time.time() + timeout
