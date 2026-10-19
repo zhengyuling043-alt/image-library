@@ -43,6 +43,7 @@ import hashlib
 import json
 import os
 import tempfile
+import time
 from pathlib import Path
 
 import numpy as np
@@ -295,13 +296,17 @@ def save_index(path, records, vectors):
         
         # 原子替换：在 Windows 上也是原子操作，旧文件在替换前始终可用
         os.replace(temporary, path)
+        # FAISS 作为可重建的检索加速侧车；NPZ 仍是兼容与恢复所需的权威数据。
+        from vector_index import persist_vector_index
+        persist_vector_index(path, records, vectors)
     finally:
         # 确保临时文件被清理，missing_ok=True 忽略文件不存在的错误
         if temporary is not None:
             temporary.unlink(missing_ok=True)
 
 
-def update_index(library=LIBRARY, index_file=INDEX_FILE, encoder=None, rebuild=False):
+def update_index(library=LIBRARY, index_file=INDEX_FILE, encoder=None, rebuild=False,
+                 checkpoint_every=25, progress=None):
     """
     增量更新图片索引，只重新编码发生变化的图片。
     
@@ -356,6 +361,8 @@ def update_index(library=LIBRARY, index_file=INDEX_FILE, encoder=None, rebuild=F
         raise RuntimeError(f"素材文件夹不存在：{library}，请检查路径。")
     
     # 读取旧索引：rebuild=True 时清空旧数据，否则从文件加载
+    checkpoint_file = index_file.with_suffix(".checkpoint.json")
+    resumed = checkpoint_file.is_file() and not rebuild
     old_records, old_vectors = ({}, {}) if rebuild else read_index(index_file)
     
     # 扫描图片库：获取所有支持的图片文件，按文件名排序确保顺序稳定
@@ -375,6 +382,7 @@ def update_index(library=LIBRARY, index_file=INDEX_FILE, encoder=None, rebuild=F
     encoder = encoder or Encoder()
     
     # 遍历所有图片文件，执行增量更新
+    processed, since_checkpoint = 0, 0
     for path in files:
         name = path.name
         try:
@@ -405,6 +413,7 @@ def update_index(library=LIBRARY, index_file=INDEX_FILE, encoder=None, rebuild=F
                 
                 # 更新统计：根据文件名是否在旧索引中，区分"新增"和"修改"
                 counts["modified" if name in old_records else "added"] += 1
+                since_checkpoint += 1
             
             # 第三步：保存成功处理的文件信息
             records[name] = {"sha256": digest, "status": "ready"}
@@ -416,16 +425,32 @@ def update_index(library=LIBRARY, index_file=INDEX_FILE, encoder=None, rebuild=F
             failures[name] = str(error)
             print(f"入库失败：{name}：{error}")
             # 失败的文件不会加入新索引，下次 update 时会自动重试
+        processed += 1
+        if progress is not None:
+            progress(processed, len(files), name, "failed" if name in failures else "ready")
+        if checkpoint_every and since_checkpoint >= checkpoint_every:
+            save_index(index_file, records, vectors)
+            checkpoint_file.write_text(json.dumps({
+                "processed": processed, "total": len(files), "last": name,
+                "ready": len(records), "updated_at": time.time(),
+            }, ensure_ascii=False, indent=2), encoding="utf-8")
+            since_checkpoint = 0
     
     # 第四步：原子保存新索引
     save_index(index_file, records, vectors)
     
     # 第五步：生成并保存报告文件
-    report = {"counts": counts, "ready": len(records), "failures": failures}
+    report = {"counts": counts, "ready": len(records), "failures": failures,
+              "resumed": resumed, "checkpoint_every": checkpoint_every}
+    from metadata_store import MetadataStore
+    metadata = MetadataStore(index_file.with_suffix(".sqlite3"))
+    metadata.sync(library, records, failures)
+    report["metadata"] = metadata.stats()
     index_file.with_suffix(".report.json").write_text(
         json.dumps(report, ensure_ascii=False, indent=2), 
         encoding="utf-8"
     )
+    checkpoint_file.unlink(missing_ok=True)
     
     # 第六步：输出统计信息到控制台
     print(f"\n新增 {counts['added']}，修改 {counts['modified']}，复用 {counts['reused']}，删除 {counts['deleted']}，失败 {counts['failed']}")

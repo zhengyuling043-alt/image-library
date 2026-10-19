@@ -67,6 +67,8 @@ from incremental_search import (
     fingerprint, read_index, save_index, update_index,
 )
 from runtime_compat import LANCZOS
+from metadata_store import MetadataStore
+from vector_index import backend_name, rank_vectors
 
 # Web 静态资源目录，存放前端 HTML、JS、CSS 等文件
 WEB = ROOT / "web"
@@ -240,6 +242,7 @@ class LibraryApp:
         self.working = False
         # 图片元数据缓存，键为文件名，值为 (key, width, height, digest)
         self.metadata_cache = {}
+        self.metadata = MetadataStore(self.index.with_suffix(".sqlite3"))
 
     def health(self):
         """Return deployment, model and index diagnostics without loading weights."""
@@ -265,8 +268,10 @@ class LibraryApp:
             "model": {"name": MODEL, "weights": WEIGHTS, "device": device,
                       "loaded": loaded, "dimension": dimension},
             "index": {"path": str(self.index.resolve()), "exists": self.index.is_file(),
-                      "ready": len(records), "error": index_error},
+                      "ready": len(records), "error": index_error,
+                      "search_backend": backend_name()},
             "library": {"path": str(self.library.resolve()), "exists": self.library.is_dir()},
+            "metadata": self.metadata.stats(),
         }
 
     def snapshot(self):
@@ -376,7 +381,10 @@ class LibraryApp:
             identifier = uuid.uuid4().hex
             self.working = True
             self.active_job = identifier
-            self.jobs[identifier] = dict(id=identifier, action=action, state="running", started=time.time())
+            self.jobs[identifier] = dict(
+                id=identifier, action=action, state="running", started=time.time(),
+                progress={"current": 0, "total": 0, "percent": 0, "name": None},
+            )
             # 保留最近 20 个任务记录，清理更早的历史
             for key in list(self.jobs)[:-20]:
                 self.jobs.pop(key)
@@ -401,6 +409,24 @@ class LibraryApp:
         # 提交到线程池异步执行
         self.executor.submit(run)
         return {"job": identifier}
+
+    def update_progress(self, current, total, name, status):
+        """Publish resumable indexing progress to the active background job."""
+
+        with self.lock:
+            identifier = self.active_job
+            if identifier in self.jobs:
+                self.jobs[identifier]["progress"] = {
+                    "current": current, "total": total,
+                    "percent": round(current * 100 / total, 1) if total else 100,
+                    "name": name, "status": status,
+                }
+
+    def update_index_task(self, rebuild=False):
+        return update_index(
+            self.library, self.index, self.encoder, rebuild=rebuild,
+            progress=self.update_progress,
+        )
 
     def upload(self, body):
         """
@@ -459,7 +485,8 @@ class LibraryApp:
         snapshot = self.snapshot()
         names = {item["name"] for item in snapshot["items"]}
         if snapshot["pending"] or names != set(records):
-            return update_index(self.library, self.index, self.encoder)
+            return update_index(self.library, self.index, self.encoder,
+                                progress=self.update_progress)
         return {"failures": {}, "ready": len(records)}
 
     def query(self, data):
@@ -502,7 +529,7 @@ class LibraryApp:
             query.write_bytes(data)
             # 提取查询图片的特征向量
             vector = self.encoder(query)
-        results, skipped = [], 0
+        valid_records, valid_vectors, skipped = {}, {}, 0
         # 遍历索引中的每张图片
         for name, record in records.items():
             path = safe_file(self.library, name)
@@ -510,12 +537,14 @@ class LibraryApp:
             if not path.is_file() or fingerprint(path) != record["sha256"]:
                 skipped += 1
                 continue
-            # 计算余弦相似度：向量点积（已归一化）
-            results.append({"name": name, "score": float(np.clip(vectors[name] @ vector, -1, 1))})
-        # 按相似度降序排序，相似度相同时按文件名排序
+            valid_records[name], valid_vectors[name] = record, vectors[name]
+        ranked, search_backend = rank_vectors(valid_records, valid_vectors, vector)
+        results = [{"name": name, "score": float(np.clip(score, -1, 1))}
+                   for name, score in ranked]
         results.sort(key=lambda item: (-item["score"], item["name"]))
         # 返回全量得分供前端做阈值过滤与双阈值对比，一次编码多次复用。
         return {"results": results, "searched": len(results), "skipped": skipped,
+                "backend": search_backend,
                 "failures": sync["failures"]}
 
     def sign_review(self, review):
@@ -650,6 +679,8 @@ class LibraryApp:
             # 更新主索引，移除已删除的记录
             save_index(self.index, {n: r for n, r in records.items() if n not in names},
                        {n: v for n, v in vectors.items() if n not in names})
+            remaining_records = {n: r for n, r in records.items() if n not in names}
+            self.metadata.sync(self.library, remaining_records)
         except Exception:
             # 失败时回滚：将已移动的文件移回素材库
             for name in reversed(moved):
@@ -715,6 +746,7 @@ class LibraryApp:
             # 恢复索引数据：合并备份的记录到主索引
             save_index(self.index, {**records, **{n: old_records[n] for n in names}},
                        {**vectors, **{n: old_vectors[n] for n in names}})
+            self.metadata.sync(self.library, {**records, **{n: old_records[n] for n in names}})
         except Exception:
             # 失败时回滚：将已恢复的文件移回回收站
             for name in reversed(moved):
@@ -933,6 +965,12 @@ def make_handler(app):
                     return self.respond(app.snapshot())
                 if url.path == "/api/health":
                     return self.respond(app.health())
+                if url.path == "/api/catalog":
+                    query = parse_qs(url.query)
+                    return self.respond(app.metadata.list(
+                        limit=query.get("limit", [50])[0], offset=query.get("offset", [0])[0],
+                        status=query.get("status", [None])[0], query=query.get("q", [None])[0],
+                    ))
                 # API：任务状态查询
                 if url.path.startswith("/api/jobs/"):
                     with app.lock:
@@ -993,7 +1031,8 @@ def make_handler(app):
                     return self.respond(app.upload(body))
                 if self.path == "/api/update":
                     # 更新索引：提交异步任务
-                    return self.respond(app.submit("update", lambda: update_index(app.library, app.index, app.encoder)))
+                    return self.respond(app.submit("update", lambda: app.update_index_task(
+                        rebuild=bool(body.get("rebuild", False)))))
                 if self.path == "/api/search":
                     # 以图搜图：解码图片后提交异步任务
                     data = decode_image(body.get("data"))
