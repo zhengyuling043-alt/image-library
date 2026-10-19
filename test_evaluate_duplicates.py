@@ -4,7 +4,7 @@ from pathlib import Path
 
 from PIL import Image
 
-from evaluate_duplicates import prepare, validate_dataset, measure
+from evaluate_duplicates import prepare, validate_dataset, measure, cluster_measure
 
 
 class EvaluationTests(unittest.TestCase):
@@ -43,6 +43,17 @@ class EvaluationTests(unittest.TestCase):
             (target / sample["split"] / "images" / sample["file"]).write_bytes(b"edited")
             with self.assertRaises(RuntimeError):
                 validate_dataset(target, manifest)
+
+    def test_cluster_metrics_capture_transitive_false_merge(self):
+        rows = [
+            {"a": "a", "b": "b", "positive": True, "exact": False, "cosine": .99, "distance": 1},
+            {"a": "a", "b": "c", "positive": False, "exact": False, "cosine": .20, "distance": 40},
+            {"a": "b", "b": "c", "positive": False, "exact": False, "cosine": .99, "distance": 1},
+        ]
+        result = cluster_measure(rows, .94, 6)
+        self.assertLess(result["precision"], 1.0)
+        self.assertEqual(result["recall"], 1.0)
+        self.assertLess(result["purity"], 1.0)
 
 
 if __name__ == "__main__":

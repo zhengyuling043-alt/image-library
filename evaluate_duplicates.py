@@ -135,6 +135,58 @@ def measure(rows, similarity, distance):
             "false_positive_rate": fp / (fp + tn) if fp + tn else 0., "errors": errors}
 
 
+def cluster_measure(rows, similarity, distance):
+    """Evaluate the transitive grouping induced by pair decisions."""
+
+    names = sorted({row[key] for row in rows for key in ("a", "b")})
+
+    def clusters(links):
+        parent = {name: name for name in names}
+        def find(name):
+            while parent[name] != name:
+                parent[name] = parent[parent[name]]
+                name = parent[name]
+            return name
+        for a, b in links:
+            ra, rb = find(a), find(b)
+            if ra != rb:
+                parent[max(ra, rb)] = min(ra, rb)
+        result = {}
+        for name in names:
+            result.setdefault(find(name), []).append(name)
+        return list(result.values())
+
+    truth_links = [(row["a"], row["b"]) for row in rows if row["positive"]]
+    predicted_links = [
+        (row["a"], row["b"]) for row in rows
+        if row["exact"] or (row["cosine"] >= similarity and row["distance"] <= distance)
+    ]
+    truth, predicted = clusters(truth_links), clusters(predicted_links)
+    truth_id = {name: index for index, group in enumerate(truth) for name in group}
+    predicted_id = {name: index for index, group in enumerate(predicted) for name in group}
+    pair_rows_for_groups = []
+    for index, a in enumerate(names):
+        for b in names[index + 1:]:
+            pair_rows_for_groups.append({
+                "positive": truth_id[a] == truth_id[b],
+                "predicted": predicted_id[a] == predicted_id[b],
+            })
+    tp = sum(row["positive"] and row["predicted"] for row in pair_rows_for_groups)
+    fp = sum(not row["positive"] and row["predicted"] for row in pair_rows_for_groups)
+    fn = sum(row["positive"] and not row["predicted"] for row in pair_rows_for_groups)
+    precision = tp / (tp + fp) if tp + fp else 0.0
+    recall = tp / (tp + fn) if tp + fn else 0.0
+    purity_hits = sum(max((sum(truth_id[name] == label for name in group)
+                           for label in set(truth_id.values())), default=0)
+                      for group in predicted)
+    complete_truth_groups = sum(len({predicted_id[name] for name in group}) == 1 for group in truth)
+    return {"predicted_groups": len(predicted), "truth_groups": len(truth),
+            "precision": precision, "recall": recall,
+            "f1": 2 * precision * recall / (precision + recall) if precision + recall else 0.0,
+            "purity": purity_hits / len(names) if names else 0.0,
+            "whole_group_recall": complete_truth_groups / len(truth) if truth else 0.0}
+
+
 def pair_rows(dataset, split, samples):
     folder = dataset / split
     report = update_index(folder / "images", folder / "index" / "incremental.npz")
@@ -175,6 +227,7 @@ def evaluate(dataset=DEFAULT_DATASET):
     test = pair_rows(dataset, "test", [s for s in manifest["samples"] if s["split"] == "test"])
     baseline = measure(test, .94, 6)
     selected = measure(test, chosen["similarity"], chosen["distance"])
+    cluster_selected = cluster_measure(test, chosen["similarity"], chosen["distance"])
     per_variant = {}
     for variant in VARIANTS[1:]:
         subset = [r for r in test if r["positive"] and {r["variant_a"], r["variant_b"]} == {"original", variant}]
@@ -184,6 +237,7 @@ def evaluate(dataset=DEFAULT_DATASET):
               "selection_rule": selection, "calibration_trials": trials,
               "selected_threshold": {"similarity": chosen["similarity"], "distance": chosen["distance"]},
               "test_baseline": baseline, "test_selected": selected,
+              "test_cluster_selected": cluster_selected,
               "test_original_vs_variant": per_variant,
               "assumption": manifest["assumption"]}
     write_json(dataset / "evaluation_results.json", result)
@@ -195,6 +249,12 @@ def evaluate(dataset=DEFAULT_DATASET):
              "|---|---:|---:|---:|---:|---:|"]
     for label, values in (("默认阈值 0.94 / 6", baseline), ("调参集选出阈值", selected)):
         lines.append(f"| {label} | {values['precision']:.2%} | {values['recall']:.2%} | {values['f1']:.4f} | {values['fp']} | {values['fn']} |")
+    lines += ["", "## 聚类级指标（包含传递闭包影响）", "",
+              "| 分组查准率 | 分组召回率 | 分组 F1 | 纯度 | 完整组召回率 |",
+              "|---:|---:|---:|---:|---:|",
+              (f"| {cluster_selected['precision']:.2%} | {cluster_selected['recall']:.2%} | "
+               f"{cluster_selected['f1']:.4f} | {cluster_selected['purity']:.2%} | "
+               f"{cluster_selected['whole_group_recall']:.2%} |")]
     lines += ["", "## 原图与各变换版本的检出情况（选出阈值）", "", "| 变换 | 找到 / 应找到 |", "|---|---:|"]
     for variant, metrics in per_variant.items():
         lines.append(f"| {variant} | {metrics['tp']} / {metrics['tp'] + metrics['fn']} |")

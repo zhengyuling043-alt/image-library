@@ -1,0 +1,43 @@
+{
+  "scope": "仅测试已编码512维向量的检索；不包含OpenCLIP图片编码和磁盘扫描时间。",
+  "runtime": {
+    "python": "3.12.3",
+    "platform": "Windows-11-10.0.22631-SP0",
+    "numpy": "2.5.4"
+  },
+  "results": [
+    {
+      "images": 500,
+      "dimension": 512,
+      "queries": 40,
+      "faiss_build_ms": 0.441,
+      "faiss_p50_ms": 0.0423,
+      "faiss_p95_ms": 0.0685,
+      "numpy_p50_ms": 0.0406,
+      "numpy_p95_ms": 0.0523,
+      "rss_delta_mb": 1.07
+    },
+    {
+      "images": 2000,
+      "dimension": 512,
+      "queries": 40,
+      "faiss_build_ms": 1.324,
+      "faiss_p50_ms": 0.1564,
+      "faiss_p95_ms": 0.3166,
+      "numpy_p50_ms": 0.1857,
+      "numpy_p95_ms": 0.3165,
+      "rss_delta_mb": 3.99
+    },
+    {
+      "images": 5000,
+      "dimension": 512,
+      "queries": 40,
+      "faiss_build_ms": 3.321,
+      "faiss_p50_ms": 0.525,
+      "faiss_p95_ms": 0.9529,
+      "numpy_p50_ms": 0.3256,
+      "numpy_p95_ms": 0.4849,
+      "rss_delta_mb": 9.77
+    }
+  ]
+}
