@@ -39,6 +39,7 @@ import io
 import json
 import hashlib
 import hmac
+import platform
 import re
 import secrets
 import sys
@@ -61,7 +62,10 @@ import numpy as np
 from PIL import Image, ImageOps
 
 from group_duplicates import generate_groups
-from incremental_search import ROOT, LIBRARY, INDEX_FILE, EXTENSIONS, Encoder, fingerprint, read_index, save_index, update_index
+from incremental_search import (
+    ROOT, LIBRARY, INDEX_FILE, EXTENSIONS, MODEL, WEIGHTS, Encoder,
+    fingerprint, read_index, save_index, update_index,
+)
 from runtime_compat import LANCZOS
 
 # Web 静态资源目录，存放前端 HTML、JS、CSS 等文件
@@ -236,6 +240,34 @@ class LibraryApp:
         self.working = False
         # 图片元数据缓存，键为文件名，值为 (key, width, height, digest)
         self.metadata_cache = {}
+
+    def health(self):
+        """Return deployment, model and index diagnostics without loading weights."""
+
+        index_error = None
+        try:
+            records, vectors = read_index(self.index)
+            dimension = len(next(iter(vectors.values()))) if vectors else 512
+        except (OSError, ValueError, RuntimeError) as error:
+            records, dimension, index_error = {}, None, str(error)
+        model = getattr(self.encoder, "model", None)
+        if model is None:
+            device, loaded = "not-loaded", False
+        else:
+            loaded = True
+            try:
+                device = str(next(model.parameters()).device)
+            except (AttributeError, StopIteration):
+                device = "unknown"
+        return {
+            "status": "degraded" if index_error else "ok",
+            "runtime": {"python": platform.python_version(), "platform": platform.platform()},
+            "model": {"name": MODEL, "weights": WEIGHTS, "device": device,
+                      "loaded": loaded, "dimension": dimension},
+            "index": {"path": str(self.index.resolve()), "exists": self.index.is_file(),
+                      "ready": len(records), "error": index_error},
+            "library": {"path": str(self.library.resolve()), "exists": self.library.is_dir()},
+        }
 
     def snapshot(self):
         """
@@ -899,6 +931,8 @@ def make_handler(app):
                 # API：素材库快照
                 if url.path == "/api/library":
                     return self.respond(app.snapshot())
+                if url.path == "/api/health":
+                    return self.respond(app.health())
                 # API：任务状态查询
                 if url.path.startswith("/api/jobs/"):
                     with app.lock:

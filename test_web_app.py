@@ -284,6 +284,17 @@ class WebAppTestCase(unittest.TestCase):
         self.assertEqual(self.request(base_url, "/api/thumbnail?name=../secret.png")[0], 400)
         self.assertEqual(self.request(base_url, "/api/update", body=[1, 2], token=token)[0], 400)
 
+    def test_tc23_health_reports_runtime_model_and_index(self):
+        """TC23 健康检查不加载模型，并公开部署诊断信息。"""
+        base_url = self.serve()
+        status, data = self.request(base_url, "/api/health")
+        health = json.loads(data)
+        self.assertEqual(status, 200)
+        self.assertEqual(health["status"], "ok")
+        self.assertFalse(health["model"]["loaded"])
+        self.assertEqual(health["model"]["dimension"], 512)
+        self.assertEqual(health["index"]["ready"], 0)
+
     def test_tc16_cleanup_removes_extra_versions(self):
         """TC16 扩展·批量清理：只删组内非推荐项，索引同步更新。"""
         base_url = self.serve()

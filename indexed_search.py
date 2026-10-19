@@ -31,6 +31,7 @@ CLIP 模型说明：
 """
 import argparse
 import json
+import os
 from pathlib import Path
 
 import numpy as np
@@ -53,6 +54,17 @@ MODEL_NAME = "ViT-B-32-quickgelu"
 WEIGHTS = "openai"
 # 支持的图像文件扩展名
 EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
+
+
+def select_device():
+    """Select CPU/GPU deterministically, with an environment override."""
+
+    requested = os.environ.get("IMAGE_LIBRARY_DEVICE", "auto").strip().lower()
+    if requested not in {"auto", "cpu", "cuda"}:
+        raise RuntimeError("IMAGE_LIBRARY_DEVICE 只能是 auto、cpu 或 cuda")
+    if requested == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError("已要求使用 CUDA，但当前 PyTorch 未检测到可用 GPU")
+    return "cuda" if requested == "cuda" or (requested == "auto" and torch.cuda.is_available()) else "cpu"
 
 
 def load_model():
@@ -96,10 +108,11 @@ def load_model():
     # 使用 open_clip 创建模型和预处理管道
     # create_model_and_transforms 返回三元组：(模型, tokenizer, 预处理器)
     # 这里我们只需要模型和预处理器，因此用 _ 忽略 tokenizer
+    device = select_device()
     model, _, preprocess = open_clip.create_model_and_transforms(
         MODEL_NAME,
         pretrained=weight_source,
-        device="cpu",
+        device=device,
         cache_dir=str(MODEL_CACHE_DIR.resolve()),
     )
     # 将模型设置为评估模式，关闭训练专用层（如 dropout）
