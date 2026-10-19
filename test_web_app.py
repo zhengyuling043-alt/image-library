@@ -317,6 +317,26 @@ class WebAppTestCase(unittest.TestCase):
         self.assertEqual(exported["items"][0]["name"], "a.png")
         self.assertIn("sha256", exported["items"][0])
 
+    def test_tc25_existing_npz_populates_catalog_on_startup(self):
+        """TC25 旧版NPZ迁移：启动即补齐SQLite，无需重新编码。"""
+        with TemporaryDirectory() as folder:
+            root = Path(folder)
+            library = root / "library"
+            index = root / "index" / "incremental.npz"
+            library.mkdir(parents=True)
+            image = library / "legacy.png"
+            image.write_bytes(png_bytes())
+            records = {image.name: {"sha256": fingerprint(image)}}
+            save_index(index, records, {image.name: np.ones(512, np.float32)})
+            migrated = web_app.LibraryApp(library=library, index=index)
+            try:
+                page = migrated.metadata.list()
+                self.assertEqual(page["total"], 1)
+                self.assertEqual(page["items"][0]["status"], "ready")
+                self.assertEqual(page["items"][0]["sha256"], records[image.name]["sha256"])
+            finally:
+                migrated.executor.shutdown(wait=True)
+
     def test_tc16_cleanup_removes_extra_versions(self):
         """TC16 扩展·批量清理：只删组内非推荐项，索引同步更新。"""
         base_url = self.serve()

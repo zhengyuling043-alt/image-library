@@ -244,6 +244,16 @@ class LibraryApp:
         self.metadata_cache = {}
         self.metadata = MetadataStore(self.index.with_suffix(".sqlite3"))
         self.group_metadata = {}
+        # 兼容升级前已存在的 NPZ 索引：首次启动时直接补齐 SQLite 目录，
+        # 不重新加载模型或编码图片。后续更新由 update_index 持续同步。
+        if self.index.is_file() and self.metadata.stats()["active"] == 0:
+            try:
+                records, _ = read_index(self.index)
+                if records:
+                    self.metadata.sync(self.library, records)
+            except (OSError, ValueError, RuntimeError):
+                # 索引损坏信息由 /api/health 统一报告，不能阻止服务启动。
+                pass
 
     def health(self):
         """Return deployment, model and index diagnostics without loading weights."""
