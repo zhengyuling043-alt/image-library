@@ -114,6 +114,9 @@ def load_model():
         pretrained=weight_source,
         device=device,
         cache_dir=str(MODEL_CACHE_DIR.resolve()),
+        # OpenAI 官方 .pt 是 TorchScript 归档；PyTorch 2.6+ 的默认
+        # weights_only=True 无法读取。weight_source 仅来自官方预训练URL缓存。
+        weights_only=False,
     )
     # 将模型设置为评估模式，关闭训练专用层（如 dropout）
     model.eval()

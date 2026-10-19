@@ -1,29 +1,33 @@
+"""Load the deployed OpenCLIP model and encode one real image."""
+
+import argparse
 from pathlib import Path
 
-import torch
-import open_clip
-from PIL import Image
+import numpy as np
 
-image_path = Path(__file__).parent / "data" / "test.jpg"
+from indexed_search import LIBRARY, encode_image, load_model
 
-if not image_path.is_file():
-    raise FileNotFoundError(f"请先放入测试图片：{image_path}")
 
-print("正在加载模型……")
-model, _, preprocess = open_clip.create_model_and_transforms(
-    "ViT-B-32-quickgelu",
-    pretrained="openai",
-    device="cpu",
-)
-model.eval()
+def default_image():
+    candidates = sorted(path for path in LIBRARY.iterdir() if path.is_file())
+    return candidates[0] if candidates else LIBRARY / "missing.jpg"
 
-with Image.open(image_path) as image:
-    image_tensor = preprocess(image.convert("RGB")).unsqueeze(0)
 
-with torch.inference_mode():
-    vector = model.encode_image(image_tensor)
-    vector = vector / vector.norm(dim=-1, keepdim=True)
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--image", type=Path, default=default_image())
+    args = parser.parse_args()
+    if not args.image.is_file():
+        raise FileNotFoundError(f"测试图片不存在：{args.image}")
+    model, preprocess = load_model()
+    vector = encode_image(args.image, model, preprocess)
+    print("图片向量化成功")
+    print("图片：", args.image.resolve())
+    print("设备：", next(model.parameters()).device)
+    print("向量形状：", vector.shape)
+    print("L2范数：", round(float(np.linalg.norm(vector)), 6))
+    print("前8维：", vector[:8].tolist())
 
-print("图片向量化成功！")
-print("向量形状：", tuple(vector.shape))
-print("前 8 个数：", vector[0, :8].tolist())
+
+if __name__ == "__main__":
+    main()
