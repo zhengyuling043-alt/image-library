@@ -112,3 +112,14 @@ class MetadataStore:
             ).fetchall()
         return {"items": [dict(row) for row in rows], "total": total,
                 "limit": limit, "offset": offset}
+
+    def by_names(self, names):
+        names = list(dict.fromkeys(names))
+        if not names:
+            return {}
+        placeholders = ",".join("?" for _ in names)
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"SELECT * FROM images WHERE name IN ({placeholders})", names
+            ).fetchall()
+        return {row["name"]: dict(row) for row in rows}

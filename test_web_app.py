@@ -191,9 +191,9 @@ class WebAppTestCase(unittest.TestCase):
         for name in ["ok.jpg", "=evil.jpg"]:
             (self.library / name).write_bytes(png_bytes())
         rows = self.app.export(["=evil.jpg", "ok.jpg", "=evil.jpg"]).decode("utf-8-sig").splitlines()
-        self.assertEqual(rows[0], "文件名,宽度,高度,文件字节数,入库状态")
-        self.assertEqual(rows[1].split(",")[0], "'=evil.jpg")
-        self.assertEqual(rows[2].split(",")[0], "ok.jpg")
+        self.assertIn("稳定ID,文件名,宽度,高度,格式,文件字节数,SHA-256", rows[0])
+        self.assertEqual(rows[1].split(",")[1], "'=evil.jpg")
+        self.assertEqual(rows[2].split(",")[1], "ok.jpg")
         self.assertEqual(len(rows), 3)
         with self.assertRaises(ValueError):
             self.app.export([])
@@ -294,6 +294,22 @@ class WebAppTestCase(unittest.TestCase):
         self.assertFalse(health["model"]["loaded"])
         self.assertEqual(health["model"]["dimension"], 512)
         self.assertEqual(health["index"]["ready"], 0)
+
+    def test_tc24_catalog_pagination_and_json_export(self):
+        for name in ["a.png", "b.png"]:
+            self.app.upload({"name": name, "data": b64(png_bytes())})
+        web_app.update_index(self.library, self.index, self.app.encoder)
+        base_url = self.serve()
+        status, data = self.request(base_url, "/api/catalog?limit=1&offset=1")
+        page = json.loads(data)
+        self.assertEqual(status, 200)
+        self.assertEqual((page["total"], len(page["items"])), (2, 1))
+        status, data = self.request(base_url, "/api/export",
+                                    {"names": ["a.png"], "format": "json"}, self.app.token)
+        exported = json.loads(data)
+        self.assertEqual(status, 200)
+        self.assertEqual(exported["items"][0]["name"], "a.png")
+        self.assertIn("sha256", exported["items"][0])
 
     def test_tc16_cleanup_removes_extra_versions(self):
         """TC16 扩展·批量清理：只删组内非推荐项，索引同步更新。"""

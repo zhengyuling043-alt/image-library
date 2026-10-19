@@ -243,6 +243,7 @@ class LibraryApp:
         # 图片元数据缓存，键为文件名，值为 (key, width, height, digest)
         self.metadata_cache = {}
         self.metadata = MetadataStore(self.index.with_suffix(".sqlite3"))
+        self.group_metadata = {}
 
     def health(self):
         """Return deployment, model and index diagnostics without loading weights."""
@@ -487,6 +488,8 @@ class LibraryApp:
         if snapshot["pending"] or names != set(records):
             return update_index(self.library, self.index, self.encoder,
                                 progress=self.update_progress)
+        if self.metadata.stats()["active"] != len(records):
+            self.metadata.sync(self.library, records)
         return {"failures": {}, "ready": len(records)}
 
     def query(self, data):
@@ -793,6 +796,12 @@ class LibraryApp:
                       "hashes": {n: report["images"][n]["sha256"] for n in group["members"]}}
             # 签名用于清理时的安全验证
             group["review"], group["signature"] = review, self.sign_review(review)
+            for name in group["members"]:
+                self.group_metadata[name] = {
+                    "group_id": group["id"], "category": group["category"],
+                    "quality_score": group.get("quality_scores", {}).get(name),
+                    "suggested_keep": name == group["suggested_keep"],
+                }
         return {"groups": report["groups"], "singletons": report["singletons"],
                 "thresholds": report["thresholds"], "total": len(report["images"]),
                 "skipped": {**report["skipped"], **update["failures"]}}
@@ -837,16 +846,40 @@ class LibraryApp:
         output = io.StringIO(newline="")
         writer = csv.writer(output)
         # 写入表头
-        writer.writerow(["文件名", "宽度", "高度", "文件字节数", "入库状态"])
+        catalogue = self.metadata.by_names(names)
+        writer.writerow(["稳定ID", "文件名", "宽度", "高度", "格式", "文件字节数", "SHA-256",
+                         "入库状态", "重复组", "重复类别", "质量分", "推荐保留", "模型", "权重"])
         # 去重，保持顺序
         for name in dict.fromkeys(names):
             item = snapshot[name]
             # 防止 CSV 注入：文件名以公式字符开头时添加单引号前缀
             # 避免电子表格软件将文件名当作公式执行
             csv_name = "'" + name if name.startswith(("=", "+", "-", "@", "\t", "\r")) else name
-            writer.writerow([csv_name, item["width"], item["height"], item["bytes"], item["status"]])
+            metadata = catalogue.get(name, {})
+            group = self.group_metadata.get(name, {})
+            writer.writerow([metadata.get("id", ""), csv_name, item["width"], item["height"],
+                             metadata.get("format", ""), item["bytes"], metadata.get("sha256", ""),
+                             item["status"], group.get("group_id", ""), group.get("category", ""),
+                             group.get("quality_score", ""), group.get("suggested_keep", ""), MODEL, WEIGHTS])
         # 返回 UTF-8 BOM 编码的字节数据
         return output.getvalue().encode("utf-8-sig")
+
+    def export_json(self, names):
+        """Export the same auditable metadata as structured JSON."""
+
+        if not isinstance(names, list) or not names:
+            raise ValueError("请先选择要导出的图片")
+        snapshot = {item["name"]: item for item in self.snapshot()["items"]}
+        if any(not isinstance(name, str) or name not in snapshot for name in names):
+            raise ValueError("选中的图片已不存在，请刷新素材库")
+        catalogue = self.metadata.by_names(names)
+        rows = []
+        for name in dict.fromkeys(names):
+            rows.append({**snapshot[name], **catalogue.get(name, {}),
+                         **self.group_metadata.get(name, {}),
+                         "model": MODEL, "weights": WEIGHTS})
+        return json.dumps({"exported_at": time.time(), "items": rows},
+                          ensure_ascii=False, indent=2).encode("utf-8")
 
 
 def make_handler(app):
@@ -1049,6 +1082,9 @@ def make_handler(app):
                     # 恢复回收站文件
                     return self.respond(app.submit("restore", lambda: app.restore(body)))
                 if self.path == "/api/export":
+                    if body.get("format") == "json":
+                        return self.respond(app.export_json(body.get("names")), "application/json; charset=utf-8",
+                                            extra={"Content-Disposition": 'attachment; filename="image-list.json"'})
                     # 导出 CSV，添加 Content-Disposition 头触发下载
                     return self.respond(app.export(body.get("names")), "text/csv; charset=utf-8", extra={"Content-Disposition": 'attachment; filename="image-list.csv"'})
                 self.respond({"error": "操作不存在"}, status=404)
