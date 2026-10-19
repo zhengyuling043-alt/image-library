@@ -36,6 +36,7 @@ import numpy as np
 from PIL import Image, ImageOps
 
 from incremental_search import LIBRARY, INDEX_FILE, EXTENSIONS, fingerprint, read_index
+from runtime_compat import LANCZOS, popcount
 
 
 def inspect_image(path):
@@ -67,7 +68,7 @@ def inspect_image(path):
         image = ImageOps.exif_transpose(source)
         width, height = image.size
         # 转为灰度图（"L"模式）并缩放到 9x8，使用 Lanczos 抗锯齿算法
-        gray = np.asarray(image.convert("L").resize((9, 8), Image.Resampling.LANCZOS))
+        gray = np.asarray(image.convert("L").resize((9, 8), LANCZOS))
     # 64 位差分感知哈希：比较每行相邻像素的亮度变化方向
     # gray[:, 1:] 是第 1~8 列，gray[:, :-1] 是第 0~7 列
     # 逐元素比较后展平为一维布尔数组，True 表示右侧更亮（位=1）
@@ -125,7 +126,7 @@ def classify_pair(a, b, info, vectors, similarity, max_distance):
     # np.clip 防止浮点精度问题导致结果超出 [-1, 1] 理论范围
     score = float(np.clip(vectors[a] @ vectors[b], -1, 1))
     # 计算 dHash 的汉明距离：异或后统计不同位的数量
-    distance = (info[a]["dhash"] ^ info[b]["dhash"]).bit_count()
+    distance = popcount(info[a]["dhash"] ^ info[b]["dhash"])
     # 按优先级判定分类
     if info[a]["sha256"] == info[b]["sha256"]:
         # SHA-256 完全一致，文件级重复，最严格的类别
@@ -304,7 +305,7 @@ def generate_groups(library=LIBRARY, index_file=INDEX_FILE, similarity=0.94, max
             for j in np.flatnonzero(row[i + 1:] >= similarity) + i + 1:
                 a, b = names[i], names[j]
                 # 计算 dHash 汉明距离
-                distance = (info[a]["dhash"] ^ info[b]["dhash"]).bit_count()
+                distance = popcount(info[a]["dhash"] ^ info[b]["dhash"])
                 # 判定是否满足邻接条件：SHA-256 相同 或 汉明距离在阈值内
                 if info[a]["sha256"] == info[b]["sha256"] or distance <= max_distance:
                     # 满足条件，标记为相邻（双向）

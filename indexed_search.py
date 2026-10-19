@@ -44,6 +44,9 @@ ROOT = Path(__file__).parent
 LIBRARY = ROOT / "data" / "library"
 # 索引文件存储目录
 INDEX_DIR = ROOT / "data" / "index"
+# 将权重缓存在项目内的英文路径，避免旧版 PyTorch 在包含非 ASCII
+# 用户名的 Windows 默认缓存目录中加载 TorchScript 权重失败。
+MODEL_CACHE_DIR = ROOT / ".runtime" / "model-cache"
 # CLIP 模型名称：ViT-B-32-quickgelu（Vision Transformer Base，patch size 32）
 MODEL_NAME = "ViT-B-32-quickgelu"
 # 预训练权重版本：openai 官方权重
@@ -80,11 +83,24 @@ def load_model():
         >>> # 模型已准备好进行图像编码
     """
     print("正在加载模型……")
+    MODEL_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    from open_clip.pretrained import download_pretrained_from_url, get_pretrained_url
+
+    weight_source = WEIGHTS
+    weight_url = get_pretrained_url(MODEL_NAME, WEIGHTS)
+    if weight_url:
+        weight_source = download_pretrained_from_url(
+            weight_url,
+            cache_dir=str(MODEL_CACHE_DIR.resolve()),
+        )
     # 使用 open_clip 创建模型和预处理管道
     # create_model_and_transforms 返回三元组：(模型, tokenizer, 预处理器)
     # 这里我们只需要模型和预处理器，因此用 _ 忽略 tokenizer
     model, _, preprocess = open_clip.create_model_and_transforms(
-        MODEL_NAME, pretrained=WEIGHTS, device="cpu"
+        MODEL_NAME,
+        pretrained=weight_source,
+        device="cpu",
+        cache_dir=str(MODEL_CACHE_DIR.resolve()),
     )
     # 将模型设置为评估模式，关闭训练专用层（如 dropout）
     model.eval()

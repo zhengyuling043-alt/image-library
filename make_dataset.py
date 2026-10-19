@@ -20,6 +20,8 @@ from pathlib import Path
 import numpy as np
 from PIL import Image, ImageDraw, ImageFilter
 
+from runtime_compat import BILINEAR, LANCZOS
+
 ROOT = Path(__file__).parent
 LIBRARY = ROOT / "data/library"
 LABELS = ROOT / "data/synthetic_labels.json"
@@ -83,7 +85,7 @@ def smooth_noise(rng, width, height):
     rows, cols = rng.randint(4, 12), rng.randint(4, 12)
     small = [[[int(rng.random() * 255) for _ in range(3)] for _ in range(cols)] for _ in range(rows)]
     image = Image.fromarray(np.array(small, dtype=np.uint8))
-    image = image.resize((width, height), Image.Resampling.BILINEAR)
+    image = image.resize((width, height), BILINEAR)
     return image.filter(ImageFilter.GaussianBlur(radius=1))
 
 
@@ -97,7 +99,7 @@ def render_variant(base, kind, rng):
     if kind == "resize":
         scale = rng.uniform(0.45, 0.75)
         image = base.resize((max(8, int(width * scale)), max(8, int(height * scale))),
-                            Image.Resampling.LANCZOS)
+                            LANCZOS)
     elif kind == "crop":
         dx, dy = int(width * rng.uniform(0.03, 0.06)), int(height * rng.uniform(0.03, 0.06))
         image = base.crop((dx, dy, width - dx, height - dy))

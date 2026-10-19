@@ -41,9 +41,11 @@ import hashlib
 import hmac
 import re
 import secrets
+import sys
 import tempfile
 import threading
 import time
+import traceback
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
@@ -51,11 +53,16 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
+LOCAL_SITE_PACKAGES = Path(__file__).resolve().parent / ".runtime" / "site-packages"
+if LOCAL_SITE_PACKAGES.is_dir():
+    sys.path.insert(0, str(LOCAL_SITE_PACKAGES))
+
 import numpy as np
 from PIL import Image, ImageOps
 
 from group_duplicates import generate_groups
 from incremental_search import ROOT, LIBRARY, INDEX_FILE, EXTENSIONS, Encoder, fingerprint, read_index, save_index, update_index
+from runtime_compat import LANCZOS
 
 # Web 静态资源目录，存放前端 HTML、JS、CSS 等文件
 WEB = ROOT / "web"
@@ -160,7 +167,7 @@ def thumbnail(path, modified, size):
         # exif_transpose 根据 EXIF Orientation 标签自动旋转，保证方向正确
         image = ImageOps.exif_transpose(image).convert("RGB")
         # thumbnail 保持宽高比缩放，LANCZOS 提供高质量重采样
-        image.thumbnail((640, 480), Image.Resampling.LANCZOS)
+        image.thumbnail((640, 480), LANCZOS)
         buffer = io.BytesIO()
         image.save(buffer, "JPEG", quality=82)
         return buffer.getvalue()
@@ -349,8 +356,12 @@ class LibraryApp:
                 with self.lock:
                     self.jobs[identifier].update(state="done", result=result)
             except Exception as error:
+                traceback.print_exc()
+                message = str(error).strip() or (
+                    f"{type(error).__name__}（异常未提供详细信息，请查看服务日志）"
+                )
                 with self.lock:
-                    self.jobs[identifier].update(state="failed", error=str(error))
+                    self.jobs[identifier].update(state="failed", error=message)
             finally:
                 with self.lock:
                     self.working = False

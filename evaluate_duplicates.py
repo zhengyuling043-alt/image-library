@@ -13,6 +13,7 @@ from group_duplicates import inspect_image
 from incremental_search import (
     ROOT, LIBRARY, EXTENSIONS, fingerprint, read_index, update_index,
 )
+from runtime_compat import LANCZOS, popcount
 
 DEFAULT_DATASET = ROOT / "data" / "evaluation"
 VARIANTS = ("original", "copy", "resize", "brightness", "crop", "watermark", "jpeg")
@@ -57,12 +58,12 @@ def prepare(source=LIBRARY, destination=DEFAULT_DATASET, count=10, seed=42, patt
         folder.mkdir(parents=True, exist_ok=True)
         with Image.open(path) as raw:
             base = ImageOps.exif_transpose(raw).convert("RGB")
-            base.thumbnail((1024, 1024), Image.Resampling.LANCZOS)
+            base.thumbnail((1024, 1024), LANCZOS)
         width, height = base.size
         original = folder / f"{source_id}_original.png"
         base.save(original)
         shutil.copyfile(original, folder / f"{source_id}_copy.png")
-        base.resize((max(1, width // 2), max(1, height // 2)), Image.Resampling.LANCZOS).save(folder / f"{source_id}_resize.png")
+        base.resize((max(1, width // 2), max(1, height // 2)), LANCZOS).save(folder / f"{source_id}_resize.png")
         ImageEnhance.Brightness(base).enhance(.7).save(folder / f"{source_id}_brightness.png")
         dx, dy = int(width * .1), int(height * .1)
         base.crop((dx, dy, width - dx, height - dy)).save(folder / f"{source_id}_crop.png")
@@ -148,7 +149,7 @@ def pair_rows(dataset, split, samples):
                      "variant_a": a["variant"], "variant_b": b["variant"],
                      "exact": records[na]["sha256"] == records[nb]["sha256"],
                      "cosine": float(np.clip(vectors[na] @ vectors[nb], -1, 1)),
-                     "distance": (info[na]["dhash"] ^ info[nb]["dhash"]).bit_count()})
+                     "distance": popcount(info[na]["dhash"] ^ info[nb]["dhash"])})
     return rows
 
 
