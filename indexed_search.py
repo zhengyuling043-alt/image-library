@@ -44,6 +44,8 @@ ROOT = Path(__file__).parent
 LIBRARY = ROOT / "data" / "library"
 # 索引文件存储目录
 INDEX_DIR = ROOT / "data" / "index"
+# 本地模型权重文件路径：优先加载本地文件，避免从 HuggingFace 下载
+LOCAL_WEIGHTS = ROOT / "data" / "models" / "open_clip_pytorch_model.bin"
 # CLIP 模型名称：ViT-B-32-quickgelu（Vision Transformer Base，patch size 32）
 MODEL_NAME = "ViT-B-32-quickgelu"
 # 预训练权重版本：openai 官方权重
@@ -72,7 +74,8 @@ def load_model():
     注意事项：
         - 当前硬编码使用 CPU 设备（device="cpu"）
         - 如需使用 GPU 加速，可将 device 改为 "cuda" 或 "mps"（Apple Silicon）
-        - 模型首次加载时会从缓存或网络下载权重文件，可能需要一些时间
+        - 优先加载 data/models/open_clip_pytorch_model.bin 本地权重文件
+        - 若本地文件不存在，则从网络下载权重文件，首次下载可能需要较长时间
         - 返回的预处理函数包含：Resize(224) -> CenterCrop(224) -> ToTensor -> Normalize
     
     示例：
@@ -80,11 +83,19 @@ def load_model():
         >>> # 模型已准备好进行图像编码
     """
     print("正在加载模型……")
+    # 如果本地已下载模型权重文件，直接加载本地文件，跳过网络下载
+    # open_clip 的 create_model_and_transforms 支持传入本地文件路径作为 pretrained 参数
+    if LOCAL_WEIGHTS.is_file():
+        print(f"使用本地模型文件：{LOCAL_WEIGHTS}")
+        pretrained_arg = str(LOCAL_WEIGHTS)
+    else:
+        # 使用 openai 官方权重标签，首次使用需联网下载
+        pretrained_arg = WEIGHTS
     # 使用 open_clip 创建模型和预处理管道
     # create_model_and_transforms 返回三元组：(模型, tokenizer, 预处理器)
     # 这里我们只需要模型和预处理器，因此用 _ 忽略 tokenizer
     model, _, preprocess = open_clip.create_model_and_transforms(
-        MODEL_NAME, pretrained=WEIGHTS, device="cpu"
+        MODEL_NAME, pretrained=pretrained_arg, device="cpu"
     )
     # 将模型设置为评估模式，关闭训练专用层（如 dropout）
     model.eval()
