@@ -225,3 +225,9 @@ __marimo__/
 data/
 *.npz
 *.report.json
+*.faiss
+*.faiss.json
+*.sqlite3
+*.sqlite3-shm
+*.sqlite3-wal
+*.checkpoint.json
