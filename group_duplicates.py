@@ -68,7 +68,11 @@ def inspect_image(path):
         image = ImageOps.exif_transpose(source)
         width, height = image.size
         # 转为灰度图（"L"模式）并缩放到 9x8，使用 Lanczos 抗锯齿算法
-        gray = np.asarray(image.convert("L").resize((9, 8), LANCZOS))
+        grayscale = image.convert("L")
+        gray = np.asarray(grayscale.resize((9, 8), LANCZOS))
+        quality_preview = grayscale.copy()
+        quality_preview.thumbnail((512, 512), LANCZOS)
+        pixels = np.asarray(quality_preview, dtype=np.float32)
     # 64 位差分感知哈希：比较每行相邻像素的亮度变化方向
     # gray[:, 1:] 是第 1~8 列，gray[:, :-1] 是第 0~7 列
     # 逐元素比较后展平为一维布尔数组，True 表示右侧更亮（位=1）
@@ -77,7 +81,25 @@ def inspect_image(path):
     value = 0
     for bit in bits:
         value = (value << 1) | int(bit)
-    return {"width": width, "height": height, "dhash": value}
+    brightness = float(pixels.mean()) if pixels.size else 0.0
+    horizontal = np.diff(pixels, axis=1) if pixels.shape[1] > 1 else np.zeros(1)
+    vertical = np.diff(pixels, axis=0) if pixels.shape[0] > 1 else np.zeros(1)
+    sharpness = float((np.mean(horizontal ** 2) + np.mean(vertical ** 2)) / 2)
+    resolution_score = min(np.log1p(width * height) / np.log1p(20_000_000), 1.0)
+    sharpness_score = min(np.log1p(sharpness) / np.log1p(5_000), 1.0)
+    exposure_score = max(0.0, 1.0 - abs(brightness - 127.5) / 127.5)
+    # 分辨率占主要权重，防止缩小图因插值后边缘更锐而误胜原始大图。
+    quality_score = round(100 * (0.65 * resolution_score +
+                                 0.25 * sharpness_score +
+                                 0.10 * exposure_score), 2)
+    return {"width": width, "height": height, "dhash": value,
+            "quality_score": quality_score, "sharpness": round(sharpness, 2),
+            "brightness": round(brightness, 2),
+            "quality_components": {
+                "resolution": round(resolution_score, 4),
+                "sharpness": round(sharpness_score, 4),
+                "exposure": round(exposure_score, 4),
+            }}
 
 
 def classify_pair(a, b, info, vectors, similarity, max_distance):
@@ -130,18 +152,18 @@ def classify_pair(a, b, info, vectors, similarity, max_distance):
     # 按优先级判定分类
     if info[a]["sha256"] == info[b]["sha256"]:
         # SHA-256 完全一致，文件级重复，最严格的类别
-        category = "exact"
+        category, reason = "exact", "SHA-256一致，文件内容完全相同"
     elif score >= similarity and distance <= max_distance:
         # 向量相似度和结构相似度都达标，判定为近重复
-        category = "near"
+        category, reason = "near", "CLIP语义与dHash视觉结构均达到阈值"
     elif score >= similarity:
         # 仅向量相似度达标，语义相似但视觉结构差异较大
-        category = "similar"
+        category, reason = "similar", "CLIP语义相似，但dHash结构差异超过近重复阈值"
     else:
         # 不满足任何相似条件
-        category = "other"
+        category, reason = "other", "未达到重复或相似阈值"
     return {"a": a, "b": b, "category": category,
-            "cosine": score, "dhash_distance": distance}
+            "cosine": score, "dhash_distance": distance, "reason": reason}
 
 
 def complete_groups(names, matches):
@@ -349,14 +371,27 @@ def generate_groups(library=LIBRARY, index_file=INDEX_FILE, similarity=0.94, max
             continue
         # 收集组内图片对的分类证据，最多 200 对（避免输出过大）
         evidence = [pair(a, b) for a, b in islice(combinations(members, 2), 200)]
-        # 推荐保留项：按像素数量最多选择，并列时按文件名字典序
-        # 注意：仅按像素数量推荐，不声称分辨率最高就一定质量最好
-        keeper = min(members, key=lambda n: (-info[n]["width"] * info[n]["height"], n))
+        # 推荐保留项：综合分辨率、清晰度与曝光，分数并列时再比较像素数。
+        keeper = min(members, key=lambda n: (-info[n]["quality_score"],
+                                              -info[n]["width"] * info[n]["height"], n))
+        # 组内代表图使用 CLIP 平均相似度最高的 medoid，对应真实素材文件。
+        representative = max(
+            members,
+            key=lambda n: (sum(float(np.clip(vectors[n] @ vectors[m], -1, 1))
+                               for m in members) / len(members), -members.index(n)),
+        )
+        keeper_info = info[keeper]
         groups.append({"id": len(groups) + 1,
                        # 若单元组数量为 1，说明是完全重复组；否则为近重复组
                        "category": "exact" if len(unit_group) == 1 else "near",
-                       "members": members, "suggested_keep": keeper,
-                       "keep_reason": "像素数量最多；并列按文件名排序，需人工确认",
+                       "members": members, "representative": representative,
+                       "suggested_keep": keeper,
+                       "quality_scores": {name: info[name]["quality_score"] for name in members},
+                       "keep_reason": (
+                           f"综合质量分 {keeper_info['quality_score']:.2f}："
+                           f"{keeper_info['width']}×{keeper_info['height']}，"
+                           f"清晰度 {keeper_info['sharpness']:.2f}，亮度 {keeper_info['brightness']:.2f}；需人工确认"
+                       ),
                        "pairs": evidence,
                        # 组内图片对的总数（组合数 C(n,2)）
                        "pair_count": len(members) * (len(members) - 1) // 2})

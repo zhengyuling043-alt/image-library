@@ -7,7 +7,7 @@ import numpy as np
 from PIL import Image
 
 from incremental_search import fingerprint, save_index
-from group_duplicates import complete_groups, generate_groups, classify_pair
+from group_duplicates import complete_groups, generate_groups, classify_pair, inspect_image
 
 
 class GroupingTests(unittest.TestCase):
@@ -15,6 +15,17 @@ class GroupingTests(unittest.TestCase):
         edges = {frozenset(("a", "b")), frozenset(("b", "c"))}
         groups = complete_groups(["c", "b", "a"], lambda a, b: frozenset((a, b)) in edges)
         self.assertEqual(groups, [["a", "b"], ["c"]])
+
+    def test_quality_score_rewards_detail_and_exposes_components(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "detail.png"
+            pixels = np.indices((64, 64)).sum(axis=0) % 2 * 255
+            Image.fromarray(pixels.astype(np.uint8)).save(path)
+            info = inspect_image(path)
+            self.assertGreater(info["sharpness"], 0)
+            self.assertGreater(info["quality_score"], 0)
+            self.assertEqual(set(info["quality_components"]),
+                             {"resolution", "sharpness", "exposure"})
 
     def test_semantic_similarity_alone_is_not_duplicate(self):
         info = {"a": {"sha256": "a", "dhash": 0},
@@ -46,6 +57,9 @@ class GroupingTests(unittest.TestCase):
             self.assertEqual(len(group["members"]), 3)
             self.assertEqual(group["category"], "near")
             self.assertNotEqual(group["suggested_keep"], "small.png")
+            self.assertIn(group["representative"], group["members"])
+            self.assertEqual(set(group["quality_scores"]), set(group["members"]))
+            self.assertIn("综合质量分", group["keep_reason"])
             self.assertEqual(sum(p["category"] == "exact" for p in group["pairs"]), 1)
             self.assertEqual(len(list(library.iterdir())), 3)
             (library / "small.png").write_bytes(b"changed")

@@ -290,15 +290,23 @@ function groupCard(group, allowCleanup = true) {
     header.append(button);
   }
   const images = node("div", "group-images");
-  group.members.slice(0, 20).forEach(name => {const item = state.items.find(i => i.name === name); if (item) images.append(card(item, {badge: name === group.suggested_keep ? "推荐保留" : undefined}));});
+  group.members.slice(0, 20).forEach(name => {
+    const item = state.items.find(i => i.name === name);
+    if (item) {
+      const score = group.quality_scores?.[name];
+      const badge = name === group.suggested_keep ? `推荐保留 · ${score?.toFixed(1) ?? ""}` :
+        (score === undefined ? undefined : `质量 ${score.toFixed(1)}`);
+      images.append(card(item, {badge}));
+    }
+  });
   if (group.members.length > 20) {
     const more = node("button", "secondary", `展开其余 ${group.members.length - 20} 个版本`);
     more.addEventListener("click", () => {group.members.slice(20).forEach(name => {const item = state.items.find(i => i.name === name); if (item) images.append(card(item));}); more.remove();});
     images.append(more);
   }
   const evidence = node("details", "evidence"); evidence.append(node("summary", "", "查看判定依据"));
-  group.pairs.forEach(pair => evidence.append(node("p", "", `${pair.a} ↔ ${pair.b}：${pair.category === "exact" ? "文件内容相同" : "近重复候选"}；相似度 ${pair.cosine.toFixed(4)}；哈希距离 ${pair.dhash_distance}`)));
-  box.append(header, images, node("p", "group-reason", "推荐依据：像素数量优先；同尺寸时按文件名排序。"));
+  group.pairs.forEach(pair => evidence.append(node("p", "", `${pair.a} ↔ ${pair.b}：${pair.reason || (pair.category === "exact" ? "文件内容相同" : "近重复候选")}；相似度 ${pair.cosine.toFixed(4)}；哈希距离 ${pair.dhash_distance}`)));
+  box.append(header, images, node("p", "group-reason", `推荐依据：${group.keep_reason || "综合质量评分后仍需人工确认"}；组代表图：${group.representative || group.suggested_keep}`));
   if (allowCleanup) {const label = node("label", "keeper-label", "本次保留："); label.append(keeper); box.append(label);}
   if (group.pair_count > group.pairs.length) evidence.append(node("p", "", `共 ${group.pair_count} 对关系，此处展示前 ${group.pairs.length} 对依据。`));
   box.append(evidence); return box;
