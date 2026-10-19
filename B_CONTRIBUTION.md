@@ -42,6 +42,7 @@ OpenCLIP模型已有功能仅是将图片编码成512维向量；上述索引、
 7884818 feat(export): add paginated catalog and auditable exports
 b1cf702 chore(storage): ignore generated index artifacts
 33e20dc test(api): retry transient Windows loopback reset
+b6d7b0d fix(catalog): migrate existing NPZ metadata on startup
 ```
 
 查看可核验记录：
@@ -54,5 +55,5 @@ git log --author="77-gm" --oneline --stat
 
 - 真实模型：OpenCLIP `ViT-B-32-quickgelu` / `openai`，CPU输出512维单位向量。
 - 真实检索：500张素材全部参与，FAISS返回同源亮度、副本、原图、缩放、水印和JPEG版本为前列结果。
-- 自动化测试：使用Python 3.12虚拟环境运行 `python -m unittest discover -v`，当前40项测试全部通过。
+- 自动化测试：使用Python 3.12虚拟环境运行 `python -m unittest discover -v`，当前41项测试全部通过。
 - 性能数据：见 `BENCHMARK_RESULTS.md`，明确区分向量检索耗时与图片编码耗时。
