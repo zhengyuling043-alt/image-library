@@ -52,6 +52,47 @@ def rank_vectors(records, vectors, query, limit=None):
     return [(names[int(i)], float(scores[int(i)])) for i in order], "numpy-dot-product"
 
 
+def threshold_pairs(names, vectors, threshold, block_size=128):
+    """Return deterministic ``(left_index, right_index, score)`` candidates.
+
+    FAISS range search avoids constructing an N x N Python/NumPy adjacency
+    matrix. The NumPy fallback scans bounded blocks and returns the same sorted
+    candidate format. Only pairs whose normalized cosine score reaches the
+    threshold are retained.
+    """
+
+    names = list(names)
+    if not -1 <= float(threshold) <= 1:
+        raise ValueError("相似度阈值须在 -1～1")
+    if len(names) < 2:
+        return [], "faiss-range-search" if _faiss() is not None else "numpy-block-scan"
+    matrix = _matrix(names, vectors)
+    candidates = []
+    faiss = _faiss()
+    if faiss is not None:
+        index = faiss.IndexFlatIP(matrix.shape[1])
+        index.add(matrix)
+        # FAISS range_search uses a strict comparison on some builds; subtract a
+        # tiny epsilon and enforce >= below to preserve the public threshold rule.
+        limits, scores, positions = index.range_search(matrix, float(threshold) - 1e-7)
+        for left in range(len(names)):
+            for offset in range(int(limits[left]), int(limits[left + 1])):
+                right = int(positions[offset])
+                score = float(scores[offset])
+                if right > left and score >= threshold:
+                    candidates.append((left, right, score))
+        return sorted(candidates), "faiss-range-search"
+
+    block_size = max(1, int(block_size))
+    for start in range(0, len(names), block_size):
+        scores = matrix[start:start + block_size] @ matrix.T
+        for offset, row in enumerate(scores):
+            left = start + offset
+            for right in np.flatnonzero(row[left + 1:] >= threshold) + left + 1:
+                candidates.append((left, int(right), float(row[right])))
+    return candidates, "numpy-block-scan"
+
+
 def persist_vector_index(index_file, records, vectors):
     """Persist a FAISS sidecar when FAISS is installed."""
 

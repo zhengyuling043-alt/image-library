@@ -37,6 +37,7 @@ from PIL import Image, ImageOps
 
 from incremental_search import LIBRARY, INDEX_FILE, EXTENSIONS, fingerprint, read_index
 from runtime_compat import LANCZOS, popcount
+from vector_index import threshold_pairs
 
 
 def inspect_image(path):
@@ -221,7 +222,7 @@ def generate_groups(library=LIBRARY, index_file=INDEX_FILE, similarity=0.94, max
         1. 验证参数和素材一致性
         2. 提取每张图片的元信息和感知哈希
         3. 按 SHA-256 合并完全重复的文件
-        4. 分块计算 CLIP 向量相似度，构建邻接矩阵
+        4. 使用 FAISS 阈值范围搜索召回候选对（无FAISS时分块回退）
         5. 使用贪心算法将图片分组
         6. 生成 JSON 报告和可选的控制台输出
 
@@ -263,8 +264,8 @@ def generate_groups(library=LIBRARY, index_file=INDEX_FILE, similarity=0.94, max
     注意事项：
         - 不会删除任何图片，仅生成待人工核对的报告
         - 要求素材与索引严格一致，避免对过期向量分组
-        - 内存优化：使用布尔邻接矩阵而非字典存储数百万图片对
-        - 分块计算：每次处理 128 张图片，避免一次性计算过大的矩阵
+        - 内存优化：仅保存达到阈值的候选边，不创建 N×N 邻接矩阵
+        - 回退策略：FAISS不可用时每次处理128张图片，避免一次性计算大矩阵
     """
     # 参数验证：确保阈值在合理范围内
     if not (-1 <= similarity <= 1) or not (0 <= max_distance <= 64):
@@ -305,46 +306,30 @@ def generate_groups(library=LIBRARY, index_file=INDEX_FILE, similarity=0.94, max
     # units 字典：以单元组的第一个成员为代表元，值为该组所有成员列表
     units = {members[0]: members for members in exact_buckets.values()}
 
-    # 建立文件名到索引位置的映射，用于快速访问邻接矩阵
+    # 建立文件名到索引位置的映射，用于候选边查询
     names = sorted(info)
     positions = {name: i for i, name in enumerate(names)}
 
-    # 第二步：构建布尔邻接矩阵，记录哪些图片对满足相似条件
-    # 使用 numpy 布尔数组而非 Python 字典，节省内存（避免存储数百万图片对）
-    adjacent = np.eye(len(names), dtype=bool)  # 初始化对角线为 True（自己与自己相邻）
-    # 将所有 CLIP 向量堆叠为矩阵，便于分块计算点积
-    matrix = np.stack([vectors[n] for n in names]) if names else np.empty((0, 512), dtype=np.float32)
-
+    # 第二步：仅召回达到CLIP阈值的候选对，再用dHash作精筛。
+    # accepted保存稀疏候选边，内存不再固定为N×N。
+    accepted = set()
     similar_pairs, similar_count = [], 0
-    # 分块计算余弦相似度：每次处理 128 张图片，避免一次性计算过大的矩阵
-    for start in range(0, len(names), 128):
-        # 计算当前块（128 张）与所有图片的点积（即余弦相似度，因为向量已归一化）
-        scores = matrix[start:start + 128] @ matrix.T
-        for offset, row in enumerate(scores):
-            i = start + offset
-            # 只检查上三角部分（j > i），避免重复计算和自比较
-            # np.flatnonzero 返回满足条件（相似度 >= 阈值）的索引
-            for j in np.flatnonzero(row[i + 1:] >= similarity) + i + 1:
-                a, b = names[i], names[j]
-                # 计算 dHash 汉明距离
-                distance = popcount(info[a]["dhash"] ^ info[b]["dhash"])
-                # 判定是否满足邻接条件：SHA-256 相同 或 汉明距离在阈值内
-                if info[a]["sha256"] == info[b]["sha256"] or distance <= max_distance:
-                    # 满足条件，标记为相邻（双向）
-                    adjacent[i, j] = adjacent[j, i] = True
-                else:
-                    # 向量相似度高但 dHash 距离大，记录为"相似但未合并"的对
-                    # 这类对可能帮助排查误判，但不足以入组
-                    similar_count += 1
-                    if len(similar_pairs) < 200:
-                        similar_pairs.append(classify_pair(a, b, info, vectors, similarity, max_distance))
+    candidates, candidate_backend = threshold_pairs(names, vectors, similarity)
+    for i, j, _score in candidates:
+        a, b = names[i], names[j]
+        distance = popcount(info[a]["dhash"] ^ info[b]["dhash"])
+        if info[a]["sha256"] == info[b]["sha256"] or distance <= max_distance:
+            accepted.add((i, j))
+        else:
+            similar_count += 1
+            if len(similar_pairs) < 200:
+                similar_pairs.append(classify_pair(a, b, info, vectors, similarity, max_distance))
 
     # 完全重复组内部强制标记为相邻，不依赖向量分数
     # 原因：浮点精度可能导致相同文件的向量点积略低于 1.0，但仍应视为完全重复
     for members in units.values():
         ids = [positions[name] for name in members]
-        # np.ix_ 用于选择子矩阵，将单元组内所有图片对标记为相邻
-        adjacent[np.ix_(ids, ids)] = True
+        accepted.update((left, right) for left, right in combinations(ids, 2))
 
     def pair(a, b):
         """辅助函数：对两张图片调用 classify_pair 进行分类"""
@@ -353,7 +338,7 @@ def generate_groups(library=LIBRARY, index_file=INDEX_FILE, similarity=0.94, max
     # 定义单元组之间的匹配函数：两个单元组匹配当且仅当它们之间的所有图片对都相邻
     # 这保证了最终分组的全连接性质：组内任意两张图片都满足相似条件
     def matches(a, b):
-        return all(adjacent[positions[x], positions[y]]
+        return all(tuple(sorted((positions[x], positions[y]))) in accepted
                    for x in units[a] for y in units[b])
 
     # 第三步：使用贪心算法将单元组分组
@@ -399,6 +384,8 @@ def generate_groups(library=LIBRARY, index_file=INDEX_FILE, similarity=0.94, max
     # 构建报告字典，包含所有分组信息和辅助数据
     report = {
         "thresholds": {"cosine": similarity, "dhash_distance": max_distance},
+        "candidate_backend": candidate_backend,
+        "candidate_pair_count": len(candidates),
         "notice": "实验阈值，结果待人工核对；不执行删除。相似标签仅指向量达到阈值而哈希未通过。",
         "strategy": "先合并完全重复文件，再按文件名顺序入组，组内所有图片对须通过判定",
         "images": info, "groups": groups, "singletons": singles, "skipped": skipped,
