@@ -28,10 +28,23 @@ python -m pip install -r requirements.txt
 
 ## 测试数据
 
-测试图片和生成的索引不包含在仓库中，需要自行准备：
-- data/library/：放置素材图片
-- data/test.jpg：默认查询图片
-- data/test_other.jpg：另一张查询图片
+仓库附带课程演示数据：108 个原图来源及其变体，共 500 张图片，以及对应的增量索引。
+- `data/library/`：500 张演示素材，克隆后即可浏览。
+- `data/index/incremental.npz`：与演示素材对应的索引，可直接用于重复分组。
+- `data/photo_manifest.json`：图片来源、变换类型和同源分组记录。
+- `data/test.jpg` 和 `data/test_other.jpg` 不随仓库提供；搜索时在网页选择查询图片，或用 `--query` 指定图库里的文件。
+
+组员在项目目录运行以下命令（Windows PowerShell 或 cmd 均可）：
+
+```bat
+python -m venv .venv
+.venv\Scripts\python.exe -m pip install -r requirements.txt
+.venv\Scripts\python.exe web_app.py
+```
+
+浏览器打开 `http://127.0.0.1:8765`。首次以图搜图或新增图片入库时仍需下载模型权重；模型、虚拟环境、备份和回收区不包含在仓库中。已克隆的组员在保存本地修改后运行 `git pull --ff-only origin main`，然后重启网页服务。
+
+只共享这次确认的 500 张基准图片和索引；`.gitignore` 仍忽略其他本地数据，新导入图片不会自动提交。已跟踪的基准图片若被清理或替换，Git 会显示对应变化，提交前请检查。图片来源与使用说明见 [PHOTO_LIBRARY.md](PHOTO_LIBRARY.md)。
 
 可运行 `python make_dataset.py` 程序化生成带同组标注的合成素材（默认 1500 张原图约 3300 张素材，含完全重复组、近重复变体组与独立单张），用于库容量演示与重复检测的准确率/召回率评测；同组真值写入 data/synthetic_labels.json，`--bases`、`--seed` 可控制规模与复现。
 

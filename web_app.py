@@ -410,6 +410,15 @@ class LibraryApp:
                 stream.write(data)
             return {"name": path.name, "status": "pending"}
 
+    def sync_index(self):
+        """搜索、分组前同步变化；未变化时不重新编码。"""
+        records, _ = read_index(self.index)
+        snapshot = self.snapshot()
+        names = {item["name"] for item in snapshot["items"]}
+        if snapshot["pending"] or names != set(records):
+            return update_index(self.library, self.index, self.encoder)
+        return {"failures": {}, "ready": len(records)}
+
     def query(self, data):
         """
         以图搜图：根据查询图片在索引中搜索相似图片。
@@ -438,6 +447,7 @@ class LibraryApp:
             - np.clip 将相似度限制在 [-1, 1] 范围内
         """
         # 读取索引：records 为 {文件名: {sha256, ...}}，vectors 为 {文件名: 向量}
+        sync = self.sync_index()
         records, vectors = read_index(self.index)
         if not records:
             raise ValueError("索引为空，请先导入图片并更新索引")
@@ -461,8 +471,9 @@ class LibraryApp:
             results.append({"name": name, "score": float(np.clip(vectors[name] @ vector, -1, 1))})
         # 按相似度降序排序，相似度相同时按文件名排序
         results.sort(key=lambda item: (-item["score"], item["name"]))
-        # 返回全量得分供前端做阈值过滤与双阈值对比，一次编码多次复用
-        return {"results": results, "searched": len(results), "skipped": skipped}
+        # 返回全量得分供前端做阈值过滤与双阈值对比，一次编码多次复用。
+        return {"results": results, "searched": len(results), "skipped": skipped,
+                "failures": sync["failures"]}
 
     def sign_review(self, review):
         """
@@ -668,7 +679,7 @@ class LibraryApp:
             raise
         return {"restored": names}
 
-    def groups(self, parameters):
+    def groups(self, parameters, sync=True):
         """
         分析重复图片分组。
 
@@ -698,16 +709,25 @@ class LibraryApp:
         # 验证参数范围
         if not np.isfinite(cosine) or not 0 <= cosine <= 1 or not 0 <= distance <= 64:
             raise ValueError("相似度应在 0～1，哈希距离应在 0～64")
-        # 调用分组算法，write_report=False 表示不生成报告文件
-        report = generate_groups(self.library, self.index, cosine, distance, write_report=False)
-        # 为每个分组生成审查数据和签名
+        update = self.sync_index() if sync else {"failures": {}}
+        if not self.index.exists():
+            raise ValueError("素材库为空，请先导入图片")
+        report = generate_groups(self.library, self.index, cosine, distance, write_report=False, skip_invalid=True)
         for group in report["groups"]:
             review = {"thresholds": report["thresholds"],
                       "hashes": {n: report["images"][n]["sha256"] for n in group["members"]}}
             # 签名用于清理时的安全验证
             group["review"], group["signature"] = review, self.sign_review(review)
         return {"groups": report["groups"], "singletons": report["singletons"],
-                "thresholds": report["thresholds"], "total": len(report["images"])}
+                "thresholds": report["thresholds"], "total": len(report["images"]),
+                "skipped": {**report["skipped"], **update["failures"]}}
+
+    def compare(self, body):
+        update = self.sync_index()
+        result = {side: self.groups(body[side], sync=False) for side in ("left", "right")}
+        for report in result.values():
+            report["skipped"].update(update["failures"])
+        return result
 
     def export(self, names):
         """
@@ -937,8 +957,7 @@ def make_handler(app):
                     # 分析重复分组
                     return self.respond(app.submit("groups", lambda: app.groups(body)))
                 if self.path == "/api/compare":
-                    # 对比两组分组结果（使用不同阈值）
-                    return self.respond(app.submit("compare", lambda: {"left": app.groups(body["left"]), "right": app.groups(body["right"])}))
+                    return self.respond(app.submit("compare", lambda: app.compare(body)))
                 if self.path == "/api/cleanup":
                     # 清理重复图片
                     return self.respond(app.submit("cleanup", lambda: app.cleanup(body)))

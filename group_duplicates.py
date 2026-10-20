@@ -189,7 +189,7 @@ def complete_groups(names, matches):
     return groups
 
 
-def generate_groups(library=LIBRARY, index_file=INDEX_FILE, similarity=0.94, max_distance=6, write_report=True):
+def generate_groups(library=LIBRARY, index_file=INDEX_FILE, similarity=0.94, max_distance=6, write_report=True, skip_invalid=False):
     """
     主工作流：检测图片库中的重复和近似重复图片，生成分组报告。
 
@@ -252,25 +252,27 @@ def generate_groups(library=LIBRARY, index_file=INDEX_FILE, similarity=0.94, max
 
     # 读取索引：records 是 {文件名: {sha256, ...}} 字典，vectors 是 {文件名: CLIP向量} 字典
     records, vectors = read_index(index_file)
-    info = {}
-    # 一致性检查：磁盘上的图片文件集合必须与索引记录完全一致
-    # 避免对已删除或新增的图片使用过期的向量进行分组
+    info, skipped = {}, {}
+    # 索引必须与当前素材一致，避免对过期向量分组。
     disk_names = {p.name for p in library.iterdir() if p.is_file() and p.suffix.lower() in EXTENSIONS}
-    if disk_names != set(records):
+    if disk_names != set(records) and not skip_invalid:
         raise RuntimeError("素材与成功入库记录不一致。请先 update 并处理失败图片。")
-
-    # 为每张图片提取元信息（尺寸、dHash）并验证 SHA-256 未变化
+    for name in disk_names - set(records):
+        skipped[name] = "尚未成功建立索引，请更新索引并查看失败原因"
     for name in sorted(records):
         path = library / name
-        digest = fingerprint(path)
-        # 验证当前文件的 SHA-256 与索引记录一致，防止图片在索引后被修改
-        if digest != records[name]["sha256"]:
-            raise RuntimeError(f"图片已变化：{name}。请先运行 update。")
-        # 合并 inspect_image 返回的元信息和 SHA-256 摘要
-        info[name] = {**inspect_image(path), "sha256": digest}
-        # 二次验证：防止在扫描过程中图片被修改（极端情况）
-        if fingerprint(path) != digest:
-            raise RuntimeError(f"图片在扫描时变化：{name}，请重试。")
+        try:
+            digest = fingerprint(path)
+            if digest != records[name]["sha256"]:
+                raise RuntimeError(f"图片已变化：{name}。请先运行 update。")
+            details = {**inspect_image(path), "sha256": digest}
+            if fingerprint(path) != digest:
+                raise RuntimeError(f"图片在扫描时变化：{name}，请重试。")
+            info[name] = details
+        except (OSError, ValueError, RuntimeError) as error:
+            if not skip_invalid:
+                raise
+            skipped[name] = str(error)
 
     # 第一步：按 SHA-256 将完全相同的文件合并为"单元组"（exact buckets）
     # 单元组内的文件字节级一致，不可拆分，作为后续分组的基本单位
@@ -363,8 +365,7 @@ def generate_groups(library=LIBRARY, index_file=INDEX_FILE, similarity=0.94, max
         "thresholds": {"cosine": similarity, "dhash_distance": max_distance},
         "notice": "实验阈值，结果待人工核对；不执行删除。相似标签仅指向量达到阈值而哈希未通过。",
         "strategy": "先合并完全重复文件，再按文件名顺序入组，组内所有图片对须通过判定",
-        "images": info, "groups": groups, "singletons": singles,
-        # 高相似度但未通过近重复规则的图片对，帮助排查误判
+        "images": info, "groups": groups, "singletons": singles, "skipped": skipped,
         "similar_pairs_not_merged": similar_pairs,
         "similar_pair_count": similar_count,
     }
