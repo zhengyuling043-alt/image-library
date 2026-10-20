@@ -37,8 +37,6 @@ import base64
 import csv
 import io
 import json
-import hashlib
-import hmac
 import platform
 import re
 import secrets
@@ -69,6 +67,7 @@ from incremental_search import (
 from runtime_compat import LANCZOS
 from metadata_store import MetadataStore
 from vector_index import backend_name, rank_vectors
+from backend_core.recycle_service import RecycleBinService
 
 # Web 静态资源目录，存放前端 HTML、JS、CSS 等文件
 WEB = ROOT / "web"
@@ -243,6 +242,14 @@ class LibraryApp:
         # 图片元数据缓存，键为文件名，值为 (key, width, height, digest)
         self.metadata_cache = {}
         self.metadata = MetadataStore(self.index.with_suffix(".sqlite3"))
+        self.recycle = RecycleBinService(
+            self.library,
+            self.index,
+            self.token,
+            read_index=lambda path: read_index(path),
+            save_index=lambda path, records, vectors: save_index(path, records, vectors),
+            metadata=self.metadata,
+        )
         self.group_metadata = {}
         # 兼容升级前已存在的 NPZ 索引：首次启动时直接补齐 SQLite 目录，
         # 不重新加载模型或编码图片。后续更新由 update_index 持续同步。
@@ -561,211 +568,24 @@ class LibraryApp:
                 "failures": sync["failures"]}
 
     def sign_review(self, review):
-        """
-        对分组审查数据进行 HMAC-SHA256 签名，防止数据篡改。
+        """Sign a duplicate-group review with the personal recycle service."""
 
-        参数:
-            review (dict): 分组审查数据，包含 thresholds 和 hashes 字段
-
-        返回:
-            str: 十六进制签名字符串（64 字符）
-
-        安全机制:
-            - 使用 self.token 作为 HMAC 密钥
-            - JSON 序列化时按键排序，确保签名一致性
-            - 前端提交清理请求时需携带签名，服务端验证
-        """
-        # JSON 序列化，按键排序确保相同数据生成相同签名
-        encoded = json.dumps(review, sort_keys=True, ensure_ascii=False).encode("utf-8")
-        # HMAC-SHA256 签名
-        return hmac.new(self.token.encode(), encoded, hashlib.sha256).hexdigest()
+        return self.recycle.sign_review(review)
 
     def recoverable_batches(self):
-        """
-        获取可恢复的回收批次列表。
+        """List recoverable soft-delete batches."""
 
-        返回:
-            list: 批次列表，每项包含 id（批次 ID）、count（文件数量）、created（创建时间戳）
-
-        回收站结构:
-            trash/
-            ├── <batch_id>/
-            │   ├── receipt.json    # 批次元数据（文件列表、保留文件、创建时间）
-            │   ├── files/          # 被清理的图片文件
-            │   └── vectors.npz     # 对应的索引数据（用于恢复）
-            └── ...
-
-        遍历逻辑:
-            1. 扫描 trash 目录下所有 receipt.json
-            2. 解析批次元数据，统计仍存在的文件数量
-            3. 按创建时间降序排序返回
-        """
-        trash = self.index.parent / "trash"
-        batches = []
-        if trash.exists():
-            # 遍历所有批次的收据文件
-            for path in trash.glob("*/receipt.json"):
-                try:
-                    receipt = json.loads(path.read_text(encoding="utf-8"))
-                    # 统计批次中仍存在的文件（可能部分已被手动恢复）
-                    remaining = [name for name in receipt["files"] if safe_file(path.parent / "files", name).is_file()]
-                    if remaining:
-                        batches.append({"id": path.parent.name, "count": len(remaining), "created": receipt["created"]})
-                except (OSError, ValueError, KeyError):
-                    # 跳过损坏或格式错误的收据文件
-                    continue
-        # 按创建时间降序排序，最新的在前
-        return sorted(batches, key=lambda item: item["created"], reverse=True)
+        return self.recycle.recoverable_batches()
 
     def cleanup(self, body):
-        """
-        清理重复图片，将选中的文件移入回收站。
+        """Soft-delete reviewed duplicates through the transactional service."""
 
-        参数:
-            body (dict): 包含以下字段：
-                - review (dict): 分组审查数据（包含 thresholds 和 hashes）
-                - signature (str): review 的 HMAC 签名
-                - names (list): 要清理的文件名列表
-                - keep (str): 要保留的文件名（不删除）
-
-        返回:
-            dict: 包含以下字段：
-                - deleted (list): 已删除的文件名列表
-                - rejected (list): 被拒绝的文件名列表（始终为空）
-                - batch (str): 回收批次 ID
-                - counts (dict): 删除数量统计
-                - message (str): 操作结果消息
-
-        异常:
-            ValueError: 当签名验证失败、参数无效或文件已变化时抛出
-
-        安全机制:
-            1. HMAC 签名验证，防止使用过期的分组数据
-            2. 文件指纹校验，确保清理前文件未被修改
-            3. 原子性操作：失败时自动回滚已移动的文件
-
-        清理流程:
-            1. 验证签名和参数
-            2. 检查所有文件指纹与索引一致
-            3. 创建回收批次，保存元数据和索引备份
-            4. 移动文件到回收站
-            5. 更新主索引，移除已删除的记录
-        """
-        # 验证签名，防止使用过期或被篡改的分组数据
-        review, signature = body.get("review"), body.get("signature", "")
-        if not isinstance(review, dict) or not isinstance(signature, str) or not hmac.compare_digest(signature, self.sign_review(review)):
-            raise ValueError("分组结果已失效，请重新分析后清理")
-        # 验证待删除文件名列表
-        names = body.get("names")
-        if not isinstance(names, list) or not names or not all(isinstance(n, str) for n in names):
-            raise ValueError("请先选择要清理的重复版本")
-        # 去重，保持顺序
-        names = list(dict.fromkeys(names))
-        members = review["hashes"]
-        keep = body.get("keep")
-        # 验证保留文件和删除文件都在分组内
-        if keep not in members or keep in names or any(name not in members for name in names):
-            raise ValueError("清理范围不属于已查看的重复组，或包含要保留的图片")
-        # 读取当前索引
-        records, vectors = read_index(self.index)
-        # 验证组内所有文件指纹与索引一致，确保文件未被修改
-        for name, digest in members.items():
-            path = safe_file(self.library, name)
-            if not path.is_file() or fingerprint(path) != digest or records.get(name, {}).get("sha256") != digest:
-                raise ValueError("组内图片已变化，请更新索引并重新分析；本次未清理任何图片")
-        # 生成批次 ID 并创建回收目录
-        batch_id = uuid.uuid4().hex
-        batch = self.index.parent / "trash" / batch_id
-        storage = batch / "files"
-        storage.mkdir(parents=True)
-        # 保存批次元数据：创建时间、文件指纹、保留文件
-        receipt = {"created": time.time(), "files": {n: records[n]["sha256"] for n in names}, "keep": keep}
-        (batch / "receipt.json").write_text(json.dumps(receipt, ensure_ascii=False), encoding="utf-8")
-        # 备份被删除文件的索引数据，用于恢复
-        save_index(batch / "vectors.npz", {n: records[n] for n in names}, {n: vectors[n] for n in names})
-        moved = []
-        try:
-            # 逐个移动文件到回收站
-            for name in names:
-                safe_file(self.library, name).replace(safe_file(storage, name))
-                moved.append(name)
-            # 更新主索引，移除已删除的记录
-            save_index(self.index, {n: r for n, r in records.items() if n not in names},
-                       {n: v for n, v in vectors.items() if n not in names})
-            remaining_records = {n: r for n, r in records.items() if n not in names}
-            self.metadata.sync(self.library, remaining_records)
-        except Exception:
-            # 失败时回滚：将已移动的文件移回素材库
-            for name in reversed(moved):
-                safe_file(storage, name).replace(safe_file(self.library, name))
-            raise
-        return {"deleted": names, "rejected": [], "batch": batch_id,
-                "counts": {"deleted": len(names)}, "message": "已移入本地回收区，可恢复"}
+        return self.recycle.cleanup(body)
 
     def restore(self, body):
-        """
-        从回收站恢复被清理的图片。
+        """Restore one recycle batch without overwriting library files."""
 
-        参数:
-            body (dict): 包含 batch 字段（回收批次 ID）
-
-        返回:
-            dict: 包含 restored 字段（已恢复的文件名列表）
-
-        异常:
-            ValueError: 当批次 ID 无效、批次已恢复、存在同名冲突或文件已变化时抛出
-
-        恢复流程:
-            1. 验证批次 ID 格式（32 位十六进制）
-            2. 读取批次元数据和备份索引
-            3. 检查每个文件：
-               - 素材库中不存在同名文件
-               - 回收站中文件指纹与备份一致
-            4. 移动文件回素材库
-            5. 恢复索引数据
-
-        安全机制:
-            - 原子性操作：失败时自动回滚
-            - 指纹校验：防止恢复损坏的文件
-            - 同名检查：避免覆盖现有文件
-        """
-        # 验证批次 ID 格式
-        identifier = body.get("batch", "")
-        if not isinstance(identifier, str) or not re.fullmatch(r"[0-9a-f]{32}", identifier):
-            raise ValueError("无效回收批次")
-        batch = self.index.parent / "trash" / identifier
-        # 读取批次元数据和备份索引
-        receipt = json.loads((batch / "receipt.json").read_text(encoding="utf-8"))
-        old_records, old_vectors = read_index(batch / "vectors.npz")
-        records, vectors = read_index(self.index)
-        # 获取批次中仍存在的文件
-        names = [n for n in receipt["files"] if safe_file(batch / "files", n).is_file()]
-        if not names:
-            raise ValueError("该批次已恢复")
-        # 恢复前检查：同名冲突和文件完整性
-        for name in names:
-            # 检查素材库中是否已存在同名文件
-            if safe_file(self.library, name).exists() or name in records:
-                raise ValueError(f"素材库已有同名文件 {name}，为避免覆盖，本次未恢复")
-            # 验证回收站中文件指纹与备份一致
-            if fingerprint(safe_file(batch / "files", name)) != receipt["files"][name]:
-                raise ValueError("回收文件已变化，停止恢复")
-        moved = []
-        try:
-            # 逐个移动文件回素材库
-            for name in names:
-                safe_file(batch / "files", name).replace(safe_file(self.library, name))
-                moved.append(name)
-            # 恢复索引数据：合并备份的记录到主索引
-            save_index(self.index, {**records, **{n: old_records[n] for n in names}},
-                       {**vectors, **{n: old_vectors[n] for n in names}})
-            self.metadata.sync(self.library, {**records, **{n: old_records[n] for n in names}})
-        except Exception:
-            # 失败时回滚：将已恢复的文件移回回收站
-            for name in reversed(moved):
-                safe_file(self.library, name).replace(safe_file(batch / "files", name))
-            raise
-        return {"restored": names}
+        return self.recycle.restore(body)
 
     def groups(self, parameters, sync=True):
         """

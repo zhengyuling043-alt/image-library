@@ -31,13 +31,15 @@ CLIP 模型说明：
 """
 import argparse
 import json
-import os
 from pathlib import Path
 
 import numpy as np
-import open_clip
-import torch
-from PIL import Image
+
+from backend_core.model_service import (
+    encode_image_path,
+    load_openclip_model,
+    select_device as resolve_device,
+)
 
 # 项目根目录
 ROOT = Path(__file__).parent
@@ -57,132 +59,22 @@ EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
 
 
 def select_device():
-    """Select CPU/GPU deterministically, with an environment override."""
+    """Compatibility entry point backed by the personal model service."""
 
-    requested = os.environ.get("IMAGE_LIBRARY_DEVICE", "auto").strip().lower()
-    if requested not in {"auto", "cpu", "cuda"}:
-        raise RuntimeError("IMAGE_LIBRARY_DEVICE 只能是 auto、cpu 或 cuda")
-    if requested == "cuda" and not torch.cuda.is_available():
-        raise RuntimeError("已要求使用 CUDA，但当前 PyTorch 未检测到可用 GPU")
-    return "cuda" if requested == "cuda" or (requested == "auto" and torch.cuda.is_available()) else "cpu"
+    return resolve_device()
 
 
 def load_model():
-    """
-    加载 CLIP 模型和图像预处理器
-    
-    功能：
-        从 open_clip 库加载预训练的 CLIP 模型及其配套的图像预处理管道。
-        模型加载后会自动设置为评估模式（eval mode），禁用 dropout 和 batch normalization
-        的训练行为，确保推理结果的一致性。
-    
-    参数：
-        无
-    
-    返回：
-        tuple: (model, preprocess)
-            - model: 加载好的 CLIP 模型实例，可用于图像编码
-            - preprocess: 图像预处理函数，接受 PIL.Image 输出 torch.Tensor
-    
-    注意事项：
-        - 当前硬编码使用 CPU 设备（device="cpu"）
-        - 如需使用 GPU 加速，可将 device 改为 "cuda" 或 "mps"（Apple Silicon）
-        - 模型首次加载时会从缓存或网络下载权重文件，可能需要一些时间
-        - 返回的预处理函数包含：Resize(224) -> CenterCrop(224) -> ToTensor -> Normalize
-    
-    示例：
-        >>> model, preprocess = load_model()
-        >>> # 模型已准备好进行图像编码
-    """
-    print("正在加载模型……")
-    MODEL_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    from open_clip.pretrained import download_pretrained_from_url, get_pretrained_url
+    """Load the configured OpenCLIP model through the backend model service."""
 
-    weight_source = WEIGHTS
-    weight_url = get_pretrained_url(MODEL_NAME, WEIGHTS)
-    if weight_url:
-        weight_source = download_pretrained_from_url(
-            weight_url,
-            cache_dir=str(MODEL_CACHE_DIR.resolve()),
-        )
-    # 使用 open_clip 创建模型和预处理管道
-    # create_model_and_transforms 返回三元组：(模型, tokenizer, 预处理器)
-    # 这里我们只需要模型和预处理器，因此用 _ 忽略 tokenizer
-    device = select_device()
-    model, _, preprocess = open_clip.create_model_and_transforms(
-        MODEL_NAME,
-        pretrained=weight_source,
-        device=device,
-        cache_dir=str(MODEL_CACHE_DIR.resolve()),
-        # OpenAI 官方 .pt 是 TorchScript 归档；PyTorch 2.6+ 的默认
-        # weights_only=True 无法读取。weight_source 仅来自官方预训练URL缓存。
-        weights_only=False,
-    )
-    # 将模型设置为评估模式，关闭训练专用层（如 dropout）
-    model.eval()
-    return model, preprocess
+    print("正在加载模型……")
+    return load_openclip_model(MODEL_NAME, WEIGHTS, MODEL_CACHE_DIR)
 
 
 def encode_image(path, model, preprocess):
-    """
-    将单张图像编码为 CLIP 特征向量
-    
-    功能：
-        读取指定路径的图像文件，通过 CLIP 模型将其编码为 512 维的归一化特征向量。
-        该向量可用于后续的相似度计算和图像检索。
-    
-    参数：
-        path (Path): 图像文件的路径，支持 JPG、PNG、WEBP、BMP 等常见格式
-        model: 已加载的 CLIP 模型实例
-        preprocess: 图像预处理函数，由 load_model() 返回
-    
-    返回：
-        numpy.ndarray: 形状为 (512,) 的一维数组，表示图像的 CLIP 特征向量
-            - 向量已经过 L2 归一化，模长为 1
-            - 数据类型为 float32
-            - 可直接用于余弦相似度计算（向量点积）
-    
-    异常处理：
-        OSError: 图像文件无法读取或损坏时抛出
-        ValueError: 图像格式不支持或预处理失败时抛出
-    
-    注意事项：
-        - 图像会自动转换为 RGB 模式，灰度图或 RGBA 图会被正确处理
-        - 使用 torch.inference_mode() 上下文管理器禁用梯度计算，节省内存并加速推理
-        - 向量归一化使用 L2 范数，确保所有向量位于单位超球面上
-        - 最终结果会先转移到 CPU 再转换为 NumPy 数组，兼容无 GPU 环境
-    
-    示例：
-        >>> model, preprocess = load_model()
-        >>> vector = encode_image(Path("image.jpg"), model, preprocess)
-        >>> vector.shape
-        (512,)
-    """
-    # 打开图像文件并转换为 RGB 格式（处理灰度图、RGBA 等情况）
-    with Image.open(path) as image:
-        # preprocess 执行以下操作：
-        # 1. Resize: 将短边缩放到 224 像素
-        # 2. CenterCrop: 中心裁剪 224x224 区域
-        # 3. ToTensor: 转换为 [0, 1] 范围的张量
-        # 4. Normalize: 使用 CLIP 专用均值和标准差进行归一化
-        # unsqueeze(0) 添加批次维度，形状从 (3, 224, 224) 变为 (1, 3, 224, 224)
-        tensor = preprocess(image.convert("RGB")).unsqueeze(0)
+    """Encode one image through the shared backend model service."""
 
-    # 使用推理模式上下文管理器，禁用梯度计算和某些训练专用操作
-    # 相比 torch.no_grad()，inference_mode() 性能更优
-    with torch.inference_mode():
-        # 通过 CLIP 模型的图像编码器将图像张量编码为特征向量
-        # 输出形状为 (1, 512)，512 是 ViT-B-32 的嵌入维度
-        vector = model.encode_image(tensor)
-        # L2 归一化：将向量除以其模长，使结果向量模长为 1
-        # 归一化后的向量之间的点积等于余弦相似度
-        # dim=-1 表示对最后一个维度（特征维度）计算范数
-        # keepdim=True 保持维度以便广播除法
-        vector = vector / vector.norm(dim=-1, keepdim=True)
-
-    # 将结果转移到 CPU 并转换为 NumPy 数组
-    # [0] 索引移除批次维度，最终形状为 (512,)
-    return vector[0].cpu().numpy()
+    return encode_image_path(path, model, preprocess)
 
 
 def build_index():
