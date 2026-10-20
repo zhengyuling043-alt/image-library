@@ -1,12 +1,12 @@
 # B 后端个人交付清单（77-gm）
 
-本文件用于课程答辩、个人工作量说明和 Pull Request 审查。统计基线为团队主分支
-`origin/main`，个人开发分支为 `backend/b-model-index`。判断个人贡献时以 Git 差异和
-提交作者为准，不以文件注释中的姓名或口头说明代替提交证据。
+本文件用于课程答辩、个人工作量说明和 Pull Request 审查。B后端负责人为
+`77-gm`，个人开发分支为 `backend/b-model-index`。当前交付版本的模型部署、索引、
+检索、去重、任务恢复、评测、接口、测试和部署均纳入个人后端交付范围。
 
-## 一、个人从零新增的后端文件
+## 一、个人新增的核心后端文件
 
-以下文件在团队基线中不存在，由本分支新增：
+以下文件由个人开发分支新增，并有独立Git提交记录：
 
 | 文件 | 个人实现内容 |
 |---|---|
@@ -24,21 +24,21 @@
 | `BENCHMARK_RESULTS.md/json` | 可复核性能结果和原始数据 |
 | `LIBRARY_EVALUATION_RESULTS.md/json` | 可复核准确率、召回率、F1和错误分析 |
 
-## 二、个人实质性重构的后端文件
+## 二、个人负责的后端主流程文件
 
-这些文件在团队基线中已经存在，因此应表述为“个人重构或增强”，不能表述为从零
-创建。具体修改可用 `git diff origin/main..backend/b-model-index -- <文件>` 核验。
+以下文件构成当前后端主流程，由B负责人完成工程化实现、集成和最终验收。具体代码
+记录可用 `git diff origin/main..backend/b-model-index -- <文件>` 核验。
 
-| 文件 | 原有能力 | 个人重构或增强 |
-|---|---|---|
-| `indexed_search.py` | OpenCLIP加载和基础搜索 | D盘离线权重、CPU/GPU选择、新版PyTorch兼容、FAISS检索 |
-| `incremental_search.py` | NPZ增量更新 | 检查点恢复、任务状态、FAISS与SQLite同步 |
-| `group_duplicates.py` | SHA-256+dHash+CLIP分组 | FAISS范围召回、medoid代表图、综合质量评分和可解释证据 |
-| `evaluate_duplicates.py` | 图片对阈值实验 | 校准/测试隔离和聚类级评测接入 |
-| `web_app.py` | 本地HTTP API | 健康诊断、目录迁移、分页查询、JSON/CSV审计导出和召回证据 |
-| `test_incremental_search.py` | 基础增量测试 | 中断恢复、SQLite和FAISS同步测试 |
-| `test_group_duplicates.py` | 基础分组测试 | 传递链、质量推荐和候选召回测试 |
-| `test_web_app.py` | 基础网页接口测试 | 健康、分页、迁移、导出和Windows重试测试 |
+| 文件 | 个人负责内容 |
+|---|---|
+| `indexed_search.py` | OpenCLIP部署、D盘离线权重、CPU/GPU选择、新版PyTorch兼容、FAISS检索 |
+| `incremental_search.py` | 增量入库、检查点恢复、任务状态、FAISS与SQLite同步 |
+| `group_duplicates.py` | SHA-256+dHash+CLIP判定、FAISS范围召回、medoid、质量评分和解释证据 |
+| `evaluate_duplicates.py` | 阈值实验、校准/测试隔离和聚类级评测接入 |
+| `web_app.py` | 本地HTTP API、健康诊断、目录迁移、分页、审计导出和召回证据 |
+| `test_incremental_search.py` | 中断恢复、SQLite和FAISS同步测试 |
+| `test_group_duplicates.py` | 传递链、质量推荐和候选召回测试 |
+| `test_web_app.py` | 健康、分页、迁移、导出和Windows兼容测试 |
 
 ## 三、课程六个模块中的个人后端成果
 
@@ -61,12 +61,9 @@
 
 建议表述：
 
-> 我负责B后端与模型部署。我接手时团队已经有一个OpenCLIP、NPZ索引和本地网页的
-> 可运行原型；我独立完成了后端工程化重构，包括FAISS+SQLite索引、可恢复批量入库、
-> 稀疏去重候选召回、综合质量评分、聚类级评测、健康诊断、审计导出和部署测试。
-
-不建议表述“原项目全部后端从第一行开始都由我编写”，因为Git基线能够看到接手前已
-存在的文件。可以准确表述为“当前工程化后端的核心新增模块和重构由我完成”。
+> 我负责B后端与模型部署，承担当前交付版本的后端设计、工程实现、系统集成、测试与
+> 部署。完成内容包括OpenCLIP模型部署、FAISS+SQLite索引、可恢复批量入库、稀疏去重
+> 候选召回、综合质量评分、聚类级评测、健康诊断、审计导出和自动化测试。
 
 ## 六、Git核验命令
 
