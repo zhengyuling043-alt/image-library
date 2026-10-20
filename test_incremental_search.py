@@ -101,6 +101,35 @@ class IncrementalIndexTest(unittest.TestCase):
             self.assertEqual(resumed_calls, [f"{number:02d}.jpg" for number in range(25, 30)])
             self.assertFalse(index.with_suffix(".checkpoint.json").exists())
 
+    def test_bulk_encoder_is_used_for_changed_images_only(self):
+        class BulkEncoder:
+            def __init__(self):
+                self.calls = []
+
+            def encode_many(self, paths, batch_size=None):
+                paths = list(paths)
+                self.calls.append([path.name for path in paths])
+                return {
+                    path: np.eye(1, 512, int(path.stem), dtype=np.float32)[0]
+                    for path in paths
+                }, {}
+
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            library, index = root / "library", root / "index.npz"
+            library.mkdir()
+            (library / "0.jpg").write_bytes(b"zero")
+            encoder = BulkEncoder()
+            first = app.update_index(library, index, encoder)
+            self.assertEqual(first["counts"]["added"], 1)
+            self.assertEqual(encoder.calls, [["0.jpg"]])
+            encoder.calls.clear()
+            (library / "1.jpg").write_bytes(b"one")
+            second = app.update_index(library, index, encoder)
+            self.assertEqual(second["counts"]["reused"], 1)
+            self.assertEqual(second["counts"]["added"], 1)
+            self.assertEqual(encoder.calls, [["1.jpg"]])
+
 
 if __name__ == "__main__":
     unittest.main()

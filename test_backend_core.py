@@ -6,7 +6,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-from backend_core.model_service import encode_image_path, select_device
+from backend_core.model_service import encode_image_path, encode_image_paths, select_device
 from backend_core.recycle_service import RecycleBinService, ReviewSigner
 
 
@@ -45,6 +45,44 @@ class ModelServiceTests(unittest.TestCase):
         self.assertEqual(vector.dtype, np.float32)
         np.testing.assert_allclose(vector, np.array([0.6, 0.8], np.float32))
         self.assertAlmostEqual(float(np.linalg.norm(vector)), 1.0, places=6)
+
+    def test_batch_encoding_is_bounded_normalized_and_isolates_bad_files(self):
+        import torch
+
+        class FakeModel:
+            def __init__(self):
+                self.batch_sizes = []
+
+            def parameters(self):
+                return iter([torch.nn.Parameter(torch.zeros(1))])
+
+            def encode_image(self, tensor):
+                self.batch_sizes.append(len(tensor))
+                values = torch.arange(1, len(tensor) + 1, dtype=torch.float32)
+                return torch.stack((values, values * 2), dim=1)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            good = []
+            for number in range(5):
+                path = root / f"{number}.png"
+                Image.new("RGB", (4, 4), (number, 0, 0)).save(path)
+                good.append(path)
+            broken = root / "broken.png"
+            broken.write_bytes(b"not-an-image")
+            model = FakeModel()
+            vectors, failures = encode_image_paths(
+                [*good, broken], model,
+                lambda image: torch.zeros((3, image.height, image.width)),
+                batch_size=2,
+            )
+
+        self.assertEqual(model.batch_sizes, [2, 2, 1])
+        self.assertEqual(set(vectors), set(good))
+        self.assertEqual(set(failures), {broken})
+        for vector in vectors.values():
+            self.assertEqual(vector.dtype, np.float32)
+            self.assertAlmostEqual(float(np.linalg.norm(vector)), 1.0, places=6)
 
 
 class RecycleServiceTests(unittest.TestCase):

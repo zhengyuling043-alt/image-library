@@ -66,7 +66,7 @@ from incremental_search import (
 )
 from runtime_compat import LANCZOS
 from metadata_store import MetadataStore
-from vector_index import backend_name, rank_vectors
+from vector_index import backend_name, rank_persistent
 from backend_core.recycle_service import RecycleBinService
 
 # Web 静态资源目录，存放前端 HTML、JS、CSS 等文件
@@ -558,7 +558,9 @@ class LibraryApp:
                 skipped += 1
                 continue
             valid_records[name], valid_vectors[name] = record, vectors[name]
-        ranked, search_backend = rank_vectors(valid_records, valid_vectors, vector)
+        ranked, search_backend = rank_persistent(
+            self.index, valid_records, valid_vectors, vector
+        )
         results = [{"name": name, "score": float(np.clip(score, -1, 1))}
                    for name, score in ranked]
         results.sort(key=lambda item: (-item["score"], item["name"]))

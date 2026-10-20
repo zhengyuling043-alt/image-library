@@ -132,6 +132,11 @@ class Encoder:
         self.model = None
         self.preprocess = None  # 图片预处理函数，与模型配套
 
+    def _ensure_loaded(self):
+        from indexed_search import load_model
+        if self.model is None:
+            self.model, self.preprocess = load_model()
+
     def __call__(self, path):
         """
         将图片文件编码为 512 维特征向量。
@@ -156,14 +161,18 @@ class Encoder:
             - 模型加载后缓存在 self.model，后续调用直接使用
         """
         # 延迟导入：避免模块加载时就触发模型下载平台访问
-        from indexed_search import load_model, encode_image
-        
-        # 懒加载检查：首次调用时才加载模型
-        if self.model is None:
-            self.model, self.preprocess = load_model()
+        from indexed_search import encode_image
+        self._ensure_loaded()
         
         # 使用加载的模型编码图片，返回特征向量
         return encode_image(path, self.model, self.preprocess)
+
+    def encode_many(self, paths, batch_size=None):
+        """Use true tensor batching for bulk import and isolate bad images."""
+
+        from backend_core.model_service import encode_image_paths
+        self._ensure_loaded()
+        return encode_image_paths(paths, self.model, self.preprocess, batch_size)
 
 
 def read_index(path):
@@ -380,6 +389,25 @@ def update_index(library=LIBRARY, index_file=INDEX_FILE, encoder=None, rebuild=F
     
     # 创建或复用编码器：允许外部传入自定义编码器（主要用于测试）
     encoder = encoder or Encoder()
+
+    # 正式 OpenCLIP 编码器提供 encode_many：先完成轻量指纹扫描，再把所有
+    # 新增/修改图片交给有界批处理。普通可调用对象仍走逐张路径，保持测试与
+    # 第三方编码器兼容。
+    precomputed_digests, batch_vectors, batch_failures = {}, {}, {}
+    if hasattr(encoder, "encode_many"):
+        changed_paths = []
+        for candidate in files:
+            try:
+                digest = fingerprint(candidate)
+                precomputed_digests[candidate] = digest
+                if old_records.get(candidate.name, {}).get("sha256") != digest:
+                    changed_paths.append(candidate)
+            except OSError as error:
+                batch_failures[candidate] = str(error)
+        if changed_paths:
+            print(f"批量计算 {len(changed_paths)} 张图片向量")
+            batch_vectors, encoding_failures = encoder.encode_many(changed_paths)
+            batch_failures.update(encoding_failures)
     
     # 遍历所有图片文件，执行增量更新
     processed, since_checkpoint = 0, 0
@@ -387,7 +415,9 @@ def update_index(library=LIBRARY, index_file=INDEX_FILE, encoder=None, rebuild=F
         name = path.name
         try:
             # 第一步：计算当前文件的 SHA256 哈希
-            digest = fingerprint(path)
+            if path in batch_failures and path not in precomputed_digests:
+                raise OSError(batch_failures[path])
+            digest = precomputed_digests.get(path) or fingerprint(path)
             
             # 第二步：检查是否与旧索引中的哈希匹配
             # old_records.get(name, {}).get("sha256") 安全地获取旧哈希值
@@ -400,7 +430,14 @@ def update_index(library=LIBRARY, index_file=INDEX_FILE, encoder=None, rebuild=F
                 print(f"计算图片向量：{name}")
                 
                 # 调用编码器将图片转换为 512 维向量
-                vector = np.asarray(encoder(path), dtype=np.float32)
+                if hasattr(encoder, "encode_many"):
+                    if path in batch_failures:
+                        raise ValueError(batch_failures[path])
+                    if path not in batch_vectors:
+                        raise ValueError("批量编码未返回图片向量")
+                    vector = np.asarray(batch_vectors[path], dtype=np.float32)
+                else:
+                    vector = np.asarray(encoder(path), dtype=np.float32)
                 
                 # 验证向量有效性：必须是 512 维且所有值有限
                 if vector.shape != (512,) or not np.isfinite(vector).all():
@@ -419,7 +456,7 @@ def update_index(library=LIBRARY, index_file=INDEX_FILE, encoder=None, rebuild=F
             records[name] = {"sha256": digest, "status": "ready"}
             vectors[name] = vector
             
-        except (OSError, ValueError) as error:
+        except (OSError, ValueError, RuntimeError) as error:
             # 处理失败：记录错误信息，继续处理下一个文件
             counts["failed"] += 1
             failures[name] = str(error)
@@ -526,8 +563,7 @@ def search(query, library=LIBRARY, index_file=INDEX_FILE):
     # 编码查询图片：创建临时 Encoder 实例并调用
     query_vector = Encoder()(query)
     
-    # 存储搜索结果：(相似度分数, 文件名) 元组列表
-    results = []
+    valid_records, valid_vectors = {}, {}
     # 过期文件计数器：哈希不匹配或文件不存在的记录
     stale = 0
     
@@ -543,9 +579,7 @@ def search(query, library=LIBRARY, index_file=INDEX_FILE):
             stale += 1
             continue
         
-        # 计算余弦相似度（对于归一化向量，点积等价于余弦相似度）
-        # @ 运算符执行向量点积：query_vector · vectors[name]
-        results.append((float(vectors[name] @ query_vector), name))
+        valid_records[name], valid_vectors[name] = record, vectors[name]
     
     # 如果有过期文件，提示用户更新索引
     if stale:
@@ -554,9 +588,12 @@ def search(query, library=LIBRARY, index_file=INDEX_FILE):
     # 打印搜索结果
     print(f"\n查询图片：{query.name}；最相似的前 5 张：")
     
-    # 排序规则：先按相似度降序（-x[0]），再按文件名升序（x[1]）
-    # 取前5名，从1开始编号
-    for rank, (score, name) in enumerate(sorted(results, key=lambda x: (-x[0], x[1]))[:5], 1):
+    from vector_index import rank_persistent
+    results, search_backend = rank_persistent(
+        index_file, valid_records, valid_vectors, query_vector, limit=5
+    )
+    print(f"检索后端：{search_backend}")
+    for rank, (name, score) in enumerate(results, 1):
         print(f"{rank}. 相似度 {score:.4f} | {name}")
 
 

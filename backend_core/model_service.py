@@ -100,3 +100,64 @@ def encode_image_path(path, model, preprocess):
         raise RuntimeError("图片向量格式无效")
     return result
 
+
+def encode_image_paths(paths, model, preprocess, batch_size=None):
+    """Batch-encode images while isolating unreadable files.
+
+    Returns ``(vectors, failures)`` keyed by the original ``Path`` objects.
+    The bounded batch avoids loading a whole library into memory and provides
+    the high-throughput path used by incremental import.
+    """
+
+    import torch
+
+    paths = [Path(path) for path in paths]
+    if batch_size is None:
+        default = 32 if str(_model_device(model)).startswith("cuda") else 8
+        batch_size = int(os.environ.get("IMAGE_LIBRARY_BATCH_SIZE", default))
+    batch_size = max(1, int(batch_size))
+    vectors, failures = {}, {}
+
+    for start in range(0, len(paths), batch_size):
+        batch_paths = paths[start:start + batch_size]
+        tensors, valid_paths = [], []
+        for path in batch_paths:
+            try:
+                with Image.open(path) as source:
+                    image = ImageOps.exif_transpose(source).convert("RGB")
+                    tensors.append(preprocess(image))
+                valid_paths.append(path)
+            except (OSError, ValueError, Image.DecompressionBombError) as exc:
+                failures[path] = str(exc)
+        if not tensors:
+            continue
+
+        tensor = torch.stack(tensors).to(_model_device(model))
+        try:
+            with torch.inference_mode():
+                encoded = model.encode_image(tensor)
+                norms = encoded.norm(dim=-1, keepdim=True)
+                if torch.any(~torch.isfinite(encoded)) or torch.any(norms <= 0):
+                    raise RuntimeError("模型返回了无效图片向量")
+                encoded = encoded / norms
+        except RuntimeError as exc:
+            # A batch-level model error must not incorrectly mark every file as
+            # successful. Fall back to one-by-one inference to identify which
+            # image failed; this also reduces peak memory after a CUDA OOM.
+            if str(_model_device(model)).startswith("cuda"):
+                torch.cuda.empty_cache()
+            for path in valid_paths:
+                try:
+                    vectors[path] = encode_image_path(path, model, preprocess)
+                except (OSError, ValueError, RuntimeError) as single_error:
+                    failures[path] = str(single_error)
+            continue
+
+        array = encoded.detach().cpu().numpy().astype(np.float32, copy=False)
+        for path, vector in zip(valid_paths, array):
+            if vector.ndim != 1 or not np.isfinite(vector).all():
+                failures[path] = "图片向量格式无效"
+            else:
+                vectors[path] = vector
+    return vectors, failures
+
