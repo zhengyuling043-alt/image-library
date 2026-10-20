@@ -12,10 +12,13 @@
 |---|---|
 | `vector_index.py` | FAISS/NumPy双后端向量检索、阈值范围候选召回、索引序列化 |
 | `metadata_store.py` | SQLite图片目录、稳定ID、状态和逻辑删除、分页筛选 |
+| `backend_core/model_service.py` | OpenCLIP设备、D盘权重缓存和图片向量编码服务 |
+| `backend_core/recycle_service.py` | HMAC确认、软删除事务、失败回滚和安全恢复服务 |
 | `runtime_compat.py` | Python/Pillow运行时兼容处理 |
 | `evaluate_library.py` | 500张真实素材的校准集/测试集隔离评测和聚类级指标 |
 | `benchmark_backend.py` | 500/2000/5000规模向量检索耗时和内存基准 |
 | `test_backend_services.py` | FAISS、SQLite和后端服务测试 |
+| `test_backend_core.py` | 模型编码、签名、软删除与恢复服务测试 |
 | `test_evaluate_library.py` | 独立评测流程、数据完整性和指标测试 |
 | `setup_backend.ps1` | D盘Python虚拟环境和依赖部署脚本 |
 | `start_backend.ps1` | 后端一键启动脚本 |
@@ -23,6 +26,7 @@
 | `BACKEND_DEPLOYMENT.md` | 模型、依赖和启动部署说明 |
 | `BENCHMARK_RESULTS.md/json` | 可复核性能结果和原始数据 |
 | `LIBRARY_EVALUATION_RESULTS.md/json` | 可复核准确率、召回率、F1和错误分析 |
+| `B_CODE_EVIDENCE.md` | 个人声明到代码、接口、测试和结果的逐项证据映射 |
 
 ## 二、个人负责的后端主流程文件
 
@@ -52,7 +56,7 @@
 ## 四、可量化验收结果
 
 - OpenCLIP：`ViT-B-32-quickgelu` / `openai`，输出512维归一化向量。
-- 自动化测试：43项通过。
+- 自动化测试：47项通过，其中新增模型服务与回收事务测试4项。
 - 真实素材独立测试：全连接聚类 Precision 98.55%、Recall 92.39%、F1 0.9537。
 - 真实500张分组：FAISS范围搜索召回2886个候选对，避免构造N×N布尔邻接矩阵。
 - 性能测试：已保存500、2000、5000向量规模的检索耗时和内存结果。

@@ -9,7 +9,7 @@
 python -m unittest test_web_app -v
 ```
 
-25条编号网页/API用例及2条回归用例全部通过（2026-10-19，Python 3.12）。加上索引、FAISS/SQLite、重复分组、生成器与评测测试，全套共43项：`python -m unittest discover -v`。
+25条编号网页/API用例及2条回归用例全部通过（2026-10-20，Python 3.12）。加上模型服务、回收事务、索引、FAISS/SQLite、重复分组、生成器与评测测试，全套共47项：`python -m unittest discover -v`。
 
 ## 用例列表
 

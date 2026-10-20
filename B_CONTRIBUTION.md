@@ -1,6 +1,7 @@
 # B 后端与模型部署个人贡献（77-gm）
 
 > 详细的文件级归属、验收数据与答辩口径见 `B_PERSONAL_DELIVERABLES.md`。
+> 个人贡献与实际代码、接口和测试的逐项对应见 `B_CODE_EVIDENCE.md`。
 > 可运行 `powershell -ExecutionPolicy Bypass -File .\show_my_backend_work.ps1`
 > 自动输出个人提交、新增文件和代码改动统计。
 
@@ -51,6 +52,9 @@ dbfd6e1 feat(evaluation): validate dedup on 500-image holdout
 496b0d1 perf(dedup): use FAISS range search for candidate pairs
 41ff184 docs(backend): record calibrated metrics and verification
 e482d51 feat(api): expose dedup candidate retrieval evidence
+0f4ddd2 docs(backend): add auditable personal deliverables
+98e151a docs(backend): define complete backend delivery scope
+65e0d5c refactor(backend): own model and recycle services
 ```
 
 查看可核验记录：
@@ -64,5 +68,5 @@ git log --author="77-gm" --oneline --stat
 - 真实模型：OpenCLIP `ViT-B-32-quickgelu` / `openai`，CPU输出512维单位向量。
 - 真实检索：500张素材全部参与，FAISS返回同源亮度、副本、原图、缩放、水印和JPEG版本为前列结果。
 - 真实去重评测：500张素材按来源隔离调参集与测试集；全连接聚类查准率98.55%、召回率92.39%、F1为0.9537，见 `LIBRARY_EVALUATION_RESULTS.md`。
-- 自动化测试：使用Python 3.12虚拟环境运行 `python -m unittest discover -v`，当前43项测试全部通过。
+- 自动化测试：使用Python 3.12虚拟环境运行 `python -m unittest discover -v`，当前47项测试全部通过。
 - 性能数据：见 `BENCHMARK_RESULTS.md`，明确区分向量检索耗时与图片编码耗时。
