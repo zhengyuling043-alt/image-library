@@ -13,7 +13,8 @@ SHA-256/dHash/余弦相似度分组、阈值对比、软删除恢复和网页界
 4. 增加FAISS检索、SQLite稳定ID目录、分页查询和JSON/CSV审计导出。
 5. 增加每25张检查点、任务进度、失败记录和中断后恢复。
 6. 增加多指标质量评分、medoid代表图和逐对判定理由。
-7. 增加聚类级指标以及500/2000/5000规模的性能基准。
+7. 增加独立测试、实际全连接聚类指标以及500/2000/5000规模的性能基准。
+8. 使用FAISS阈值范围搜索生成去重候选边，移除N×N布尔邻接矩阵。
 
 OpenCLIP模型已有功能仅是将图片编码成512维向量；上述索引、恢复、聚类、
 评分、评测、接口和部署逻辑均属于本分支的工程实现。
@@ -23,7 +24,7 @@ OpenCLIP模型已有功能仅是将图片编码成512维向量；上述索引、
 | 课程模块 | 后端完成情况 | 验收证据 |
 |---|---|---|
 | 1 图像向量化与索引 | 已完成 | OpenCLIP + NPZ + FAISS + SQLite |
-| 2 近重复判定与归并 | 已完成 | 三档判定、全连接约束、medoid、判定理由 |
+| 2 近重复判定与归并 | 已完成 | 三档判定、FAISS候选召回、全连接约束、medoid、判定理由 |
 | 5 批量导入与增量更新 | 已完成 | SHA-256复用、检查点、进度、重试与原子保存 |
 | 6 阈值调节与对比 | 已完成 | 网页双阈值、独立校准/测试、聚类级指标 |
 | 7 重复组管理 | 已完成 | 综合质量推荐、HMAC确认、软删除与恢复 |
@@ -43,6 +44,8 @@ OpenCLIP模型已有功能仅是将图片编码成512维向量；上述索引、
 b1cf702 chore(storage): ignore generated index artifacts
 33e20dc test(api): retry transient Windows loopback reset
 b6d7b0d fix(catalog): migrate existing NPZ metadata on startup
+dbfd6e1 feat(evaluation): validate dedup on 500-image holdout
+496b0d1 perf(dedup): use FAISS range search for candidate pairs
 ```
 
 查看可核验记录：
@@ -55,5 +58,6 @@ git log --author="77-gm" --oneline --stat
 
 - 真实模型：OpenCLIP `ViT-B-32-quickgelu` / `openai`，CPU输出512维单位向量。
 - 真实检索：500张素材全部参与，FAISS返回同源亮度、副本、原图、缩放、水印和JPEG版本为前列结果。
-- 自动化测试：使用Python 3.12虚拟环境运行 `python -m unittest discover -v`，当前41项测试全部通过。
+- 真实去重评测：500张素材按来源隔离调参集与测试集；全连接聚类查准率98.55%、召回率92.39%、F1为0.9537，见 `LIBRARY_EVALUATION_RESULTS.md`。
+- 自动化测试：使用Python 3.12虚拟环境运行 `python -m unittest discover -v`，当前43项测试全部通过。
 - 性能数据：见 `BENCHMARK_RESULTS.md`，明确区分向量检索耗时与图片编码耗时。

@@ -134,7 +134,7 @@ python -m unittest test_group_duplicates -v
 从增量索引读取向量，检查素材没有变化后生成 `data/index/duplicate_groups.json`，不删除原图，也不重新调用模型。
 
 - exact：SHA-256 相同的完全重复文件。
-- near：不同文件的向量余弦相似度至少 0.94，且 64 位差分感知哈希（dHash）距离不超过 6。两个默认值只是初始实验值，尚未经评测标定。
+- near：不同文件的向量余弦相似度至少 0.94，且 64 位差分感知哈希（dHash）距离不超过 6。该默认方案是保守基线；500张图库的调参与独立测试结果见 `LIBRARY_EVALUATION_RESULTS.md`。
 - similar：向量达到上述阈值，但感知哈希不通过，仅列入相似图片对，不据此合并。
 - 其他图片保持独立。这些标签是算法判定，不是人工标准答案。
 
@@ -148,7 +148,7 @@ python -m unittest test_group_duplicates -v
 python group_duplicates.py --similarity 0.94 --hash-distance 6
 ```
 
-限制：该原型适用于小库，分块计算与布尔邻接表仍有平方级开销，但不再保存所有图片对字典；每组最多输出 200 对证据并记录总数。dHash 对裁剪、边框、水印等变化可能漏判；不能只为某张图片入组而放宽阈值，应在有来源记录的正负样本上评测。网页版现已提供分组查看与按组清理（手动选择保留项，可恢复），完整的质量评分与人工标准答案仍缺失。
+分组优先使用FAISS阈值范围搜索，只保留达到CLIP阈值的候选边，不创建N×N邻接矩阵；FAISS不可用时自动使用NumPy分块扫描。每组最多输出200对证据并记录总数。dHash 对裁剪、边框等变化仍可能漏判；不能只为某张图片入组而放宽阈值，应在有来源记录的正负样本上评测。网页版提供综合质量评分、分组查看、人工选择保留项、软删除和恢复。
 
 ## 批量评测数据与阈值实验
 
@@ -170,10 +170,16 @@ python evaluate_duplicates.py evaluate --dataset data/evaluation_v2
 
 evaluate 建立独立增量索引，比较 9 组候选阈值（余弦 0.90/0.94/0.97 × 哈希距离 6/12/18），仅根据调参集选择候选，再与默认阈值在测试集比较。优先选择调参集查准率至少 98% 的最高召回率方案；不达标时只报告 F1 最高候选。结果写入 `evaluation_report.md` 与 `evaluation_results.json`，含 TP/FP/FN/TN、查准率、召回率、F1、误判率、错误图片对，以及原图对各变换版本的检出情况。不会自动修改分组脚本阈值。
 
-这属于图片对判定评测，不是完整聚类评测，也不是课程要求的 15 条软件测试用例。10 张原图的结果只能用于初步诊断，不足以证明实际去重精度；若依据测试结果继续改算法，需另留新的原图用于最终验收。
+上述命令用于生成新的小型独立数据。仓库现有500张带来源标注的素材可直接复用既有向量，运行：
 
 ```bat
-python -m unittest test_evaluate_duplicates test_group_duplicates test_incremental_search -v
+python evaluate_library.py
+```
+
+脚本严格核对清单、磁盘和索引哈希，仅用calibration分区选择阈值，再一次性报告test分区；同时对比简单传递闭包与系统全连接约束聚类。当前独立测试结果：图片对F1为0.9471；全连接聚类查准率98.55%、召回率92.39%、F1为0.9537，详见 `LIBRARY_EVALUATION_RESULTS.md` 和JSON原始结果。若依据测试结果继续改算法，需另留新的来源图用于最终验收。
+
+```bat
+python -m unittest test_evaluate_library test_evaluate_duplicates test_group_duplicates test_incremental_search -v
 ```
 
 ## 本地网页版
