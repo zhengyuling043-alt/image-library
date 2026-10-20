@@ -9,7 +9,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image, ImageDraw, ImageEnhance, ImageOps
 
-from group_duplicates import inspect_image
+from group_duplicates import complete_groups, inspect_image
 from incremental_search import (
     ROOT, LIBRARY, EXTENSIONS, fingerprint, read_index, update_index,
 )
@@ -185,6 +185,81 @@ def cluster_measure(rows, similarity, distance):
             "f1": 2 * precision * recall / (precision + recall) if precision + recall else 0.0,
             "purity": purity_hits / len(names) if names else 0.0,
             "whole_group_recall": complete_truth_groups / len(truth) if truth else 0.0}
+
+
+def complete_link_cluster_measure(rows, similarity, distance):
+    """Evaluate the deterministic complete-link grouping used by the product.
+
+    Exact duplicate files are first kept as indivisible units. A unit may join a
+    predicted group only when every cross-unit image pair passes the decision
+    rule. This mirrors :func:`group_duplicates.generate_groups` and prevents a
+    transitive A-B-C chain from merging A with C.
+    """
+
+    names = sorted({row[key] for row in rows for key in ("a", "b")})
+    if not names:
+        return {"predicted_groups": 0, "truth_groups": 0, "precision": 0.0,
+                "recall": 0.0, "f1": 0.0, "purity": 0.0,
+                "whole_group_recall": 0.0, "overmerge_groups": 0,
+                "split_truth_groups": 0}
+    lookup = {frozenset((row["a"], row["b"])): row for row in rows}
+
+    def connected_groups(links):
+        parent = {name: name for name in names}
+
+        def find(name):
+            while parent[name] != name:
+                parent[name] = parent[parent[name]]
+                name = parent[name]
+            return name
+
+        for a, b in links:
+            ra, rb = find(a), find(b)
+            if ra != rb:
+                parent[max(ra, rb)] = min(ra, rb)
+        grouped = {}
+        for name in names:
+            grouped.setdefault(find(name), []).append(name)
+        return [sorted(group) for group in grouped.values()]
+
+    truth = connected_groups((row["a"], row["b"]) for row in rows if row["positive"])
+    exact_units = connected_groups((row["a"], row["b"]) for row in rows if row["exact"])
+    units = {group[0]: group for group in sorted(exact_units, key=lambda group: group[0])}
+
+    def predicted_pair(a, b):
+        row = lookup[frozenset((a, b))]
+        return row["exact"] or (row["cosine"] >= similarity and row["distance"] <= distance)
+
+    def units_match(a, b):
+        return all(predicted_pair(left, right) for left in units[a] for right in units[b])
+
+    predicted = [sorted(name for unit in group for name in units[unit])
+                 for group in complete_groups(units, units_match)]
+    truth_id = {name: index for index, group in enumerate(truth) for name in group}
+    predicted_id = {name: index for index, group in enumerate(predicted) for name in group}
+    tp = fp = fn = 0
+    for index, a in enumerate(names):
+        for b in names[index + 1:]:
+            positive = truth_id[a] == truth_id[b]
+            same_group = predicted_id[a] == predicted_id[b]
+            tp += positive and same_group
+            fp += not positive and same_group
+            fn += positive and not same_group
+    precision = tp / (tp + fp) if tp + fp else 0.0
+    recall = tp / (tp + fn) if tp + fn else 0.0
+    purity_hits = sum(max((sum(truth_id[name] == label for name in group)
+                           for label in set(truth_id.values())), default=0)
+                      for group in predicted)
+    complete_truth_groups = sum(len({predicted_id[name] for name in group}) == 1 for group in truth)
+    overmerge_groups = sum(len({truth_id[name] for name in group}) > 1 for group in predicted)
+    split_truth_groups = sum(len({predicted_id[name] for name in group}) > 1 for group in truth)
+    return {"predicted_groups": len(predicted), "truth_groups": len(truth),
+            "precision": precision, "recall": recall,
+            "f1": 2 * precision * recall / (precision + recall) if precision + recall else 0.0,
+            "purity": purity_hits / len(names),
+            "whole_group_recall": complete_truth_groups / len(truth),
+            "overmerge_groups": overmerge_groups,
+            "split_truth_groups": split_truth_groups}
 
 
 def pair_rows(dataset, split, samples):

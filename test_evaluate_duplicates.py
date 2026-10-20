@@ -4,7 +4,9 @@ from pathlib import Path
 
 from PIL import Image
 
-from evaluate_duplicates import prepare, validate_dataset, measure, cluster_measure
+from evaluate_duplicates import (
+    cluster_measure, complete_link_cluster_measure, measure, prepare, validate_dataset,
+)
 
 
 class EvaluationTests(unittest.TestCase):
@@ -54,6 +56,12 @@ class EvaluationTests(unittest.TestCase):
         self.assertLess(result["precision"], 1.0)
         self.assertEqual(result["recall"], 1.0)
         self.assertLess(result["purity"], 1.0)
+
+        protected = complete_link_cluster_measure(rows, .94, 6)
+        self.assertEqual(protected["precision"], 1.0)
+        self.assertEqual(protected["recall"], 1.0)
+        self.assertEqual(protected["purity"], 1.0)
+        self.assertEqual(protected["overmerge_groups"], 0)
 
 
 if __name__ == "__main__":
