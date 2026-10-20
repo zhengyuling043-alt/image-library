@@ -21,3 +21,5 @@
 搜索响应中的 `backend` 会明确返回 `faiss-index-flat-ip` 或
 `numpy-dot-product`。分组响应包含 `representative`、`quality_scores`、
 `suggested_keep`、`keep_reason` 和每个图片对的 `reason`，用于解释系统判断。
+分组顶层同时返回 `candidate_backend`、`candidate_pair_count` 与
+`similar_pair_count`，页面可直接展示FAISS候选召回方式和各阶段数量。

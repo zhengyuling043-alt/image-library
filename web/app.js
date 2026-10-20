@@ -320,7 +320,11 @@ function renderGroupList(container, groups, allowCleanup = true) {
   }
   more.addEventListener("click", append); append();
 }
-function summaryText(result) {return `${result.total} 张参与分析 · ${result.groups.length} 个候选组 · ${result.singletons.length} 张未归组 · ${Object.keys(result.skipped || {}).length} 张跳过`;}
+function summaryText(result) {
+  const backend = result.candidate_backend === "faiss-range-search" ? "FAISS范围召回" : "NumPy分块召回";
+  const candidates = Number.isFinite(result.candidate_pair_count) ? ` · ${result.candidate_pair_count} 个向量候选对` : "";
+  return `${result.total} 张参与分析 · ${result.groups.length} 个候选组 · ${result.singletons.length} 张未归组 · ${Object.keys(result.skipped || {}).length} 张跳过 · ${backend}${candidates}`;
+}
 function skippedDetails(result) {
   const details = node("details", "evidence");
   const entries = Object.entries(result.skipped || {});

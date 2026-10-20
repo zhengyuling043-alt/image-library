@@ -814,6 +814,9 @@ class LibraryApp:
                 }
         return {"groups": report["groups"], "singletons": report["singletons"],
                 "thresholds": report["thresholds"], "total": len(report["images"]),
+                "candidate_backend": report.get("candidate_backend"),
+                "candidate_pair_count": report.get("candidate_pair_count", 0),
+                "similar_pair_count": report.get("similar_pair_count", 0),
                 "skipped": {**report["skipped"], **update["failures"]}}
 
     def compare(self, body):

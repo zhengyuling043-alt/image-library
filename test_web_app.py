@@ -76,6 +76,8 @@ class WebAppTestCase(unittest.TestCase):
             reports = [job["result"]] if endpoint.endswith("groups") else job["result"].values()
             for report in reports:
                 self.assertEqual(report["total"], 2)
+                self.assertIn(report["candidate_backend"], {"faiss-range-search", "numpy-block-scan"})
+                self.assertGreaterEqual(report["candidate_pair_count"], 1)
                 self.assertEqual(set(report["groups"][0]["members"]), {"原图.png", "副本.png"})
                 self.assertIn("broken.jpg", report["skipped"])
 
