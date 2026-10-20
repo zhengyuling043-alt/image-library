@@ -1,5 +1,9 @@
 # B 后端与模型部署个人贡献（77-gm）
 
+> 详细的文件级归属、验收数据与答辩口径见 `B_PERSONAL_DELIVERABLES.md`。
+> 可运行 `powershell -ExecutionPolicy Bypass -File .\show_my_backend_work.ps1`
+> 自动输出个人提交、新增文件和代码改动统计。
+
 ## 项目原有能力与个人贡献边界
 
 项目原有能力包括OpenCLIP图片编码、NPZ索引、基础增量更新、以图搜图、
@@ -46,6 +50,8 @@ b1cf702 chore(storage): ignore generated index artifacts
 b6d7b0d fix(catalog): migrate existing NPZ metadata on startup
 dbfd6e1 feat(evaluation): validate dedup on 500-image holdout
 496b0d1 perf(dedup): use FAISS range search for candidate pairs
+41ff184 docs(backend): record calibrated metrics and verification
+e482d51 feat(api): expose dedup candidate retrieval evidence
 ```
 
 查看可核验记录：
