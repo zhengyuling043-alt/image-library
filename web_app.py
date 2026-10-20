@@ -59,7 +59,7 @@ if LOCAL_SITE_PACKAGES.is_dir():
 import numpy as np
 from PIL import Image, ImageOps
 
-from group_duplicates import generate_groups
+from group_duplicates import generate_groups, inspect_image
 from incremental_search import (
     ROOT, LIBRARY, INDEX_FILE, EXTENSIONS, MODEL, WEIGHTS, Encoder,
     fingerprint, read_index, save_index, update_index,
@@ -68,6 +68,7 @@ from runtime_compat import LANCZOS
 from metadata_store import MetadataStore
 from vector_index import backend_name, rank_persistent
 from backend_core.recycle_service import RecycleBinService
+from backend_core.retrieval_policy import PRESETS, explain_image_result, explain_text_result
 
 # Web 静态资源目录，存放前端 HTML、JS、CSS 等文件
 WEB = ROOT / "web"
@@ -549,6 +550,8 @@ class LibraryApp:
             query.write_bytes(data)
             # 提取查询图片的特征向量
             vector = self.encoder(query)
+            query_sha = fingerprint(query)
+            query_info = inspect_image(query)
         valid_records, valid_vectors, skipped = {}, {}, 0
         # 遍历索引中的每张图片
         for name, record in records.items():
@@ -561,13 +564,40 @@ class LibraryApp:
         ranked, search_backend = rank_persistent(
             self.index, valid_records, valid_vectors, vector
         )
-        results = [{"name": name, "score": float(np.clip(score, -1, 1))}
-                   for name, score in ranked]
+        results = []
+        for name, score in ranked:
+            score = float(np.clip(score, -1, 1))
+            explanation = explain_image_result(
+                score, query_sha, query_info, valid_records[name]["sha256"],
+                inspect_image(safe_file(self.library, name)),
+            )
+            results.append({"name": name, "score": score, **explanation})
         results.sort(key=lambda item: (-item["score"], item["name"]))
         # 返回全量得分供前端做阈值过滤与双阈值对比，一次编码多次复用。
         return {"results": results, "searched": len(results), "skipped": skipped,
                 "backend": search_backend,
                 "failures": sync["failures"]}
+
+    def query_text(self, text):
+        """Search images with an OpenCLIP text embedding (English optimized)."""
+
+        text = str(text or "").strip()
+        if not text or len(text) > 200:
+            raise ValueError("请输入 1～200 个字符的检索文本")
+        sync = self.sync_index()
+        records, vectors = read_index(self.index)
+        if not records:
+            raise ValueError("索引为空，请先导入图片并更新索引")
+        vector = self.encoder.encode_text(text)
+        ranked, search_backend = rank_persistent(self.index, records, vectors, vector)
+        results = []
+        for name, score in ranked:
+            score = float(np.clip(score, -1, 1))
+            results.append({"name": name, "score": score,
+                            **explain_text_result(score, text)})
+        return {"results": results, "searched": len(results), "skipped": 0,
+                "backend": search_backend, "query_type": "text",
+                "text": text, "failures": sync["failures"]}
 
     def sign_review(self, review):
         """Sign a duplicate-group review with the personal recycle service."""
@@ -614,8 +644,10 @@ class LibraryApp:
             3. 前端使用签名验证后才能执行清理操作
         """
         # 解析参数，提供默认值
-        cosine = float(parameters.get("similarity", .94))
-        distance = int(parameters.get("distance", 6))
+        selected = parameters.get("preset")
+        defaults = PRESETS.get(selected, PRESETS["balanced"])
+        cosine = float(parameters.get("similarity", defaults["cosine"]))
+        distance = int(parameters.get("distance", defaults["dhash_distance"]))
         # 验证参数范围
         if not np.isfinite(cosine) or not 0 <= cosine <= 1 or not 0 <= distance <= 64:
             raise ValueError("相似度应在 0～1，哈希距离应在 0～64")
@@ -833,6 +865,8 @@ def make_handler(app):
                     return self.respond(app.snapshot())
                 if url.path == "/api/health":
                     return self.respond(app.health())
+                if url.path == "/api/presets":
+                    return self.respond({"default": "balanced", "presets": PRESETS})
                 if url.path == "/api/catalog":
                     query = parse_qs(url.query)
                     return self.respond(app.metadata.list(
@@ -905,6 +939,9 @@ def make_handler(app):
                     # 以图搜图：解码图片后提交异步任务
                     data = decode_image(body.get("data"))
                     return self.respond(app.submit("search", lambda: app.query(data)))
+                if self.path == "/api/search-text":
+                    text_query = body.get("text")
+                    return self.respond(app.submit("search-text", lambda: app.query_text(text_query)))
                 if self.path == "/api/groups":
                     # 分析重复分组
                     return self.respond(app.submit("groups", lambda: app.groups(body)))

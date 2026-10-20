@@ -6,7 +6,8 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-from backend_core.model_service import encode_image_path, encode_image_paths, select_device
+from backend_core.model_service import encode_image_path, encode_image_paths, encode_texts, select_device
+from backend_core.retrieval_policy import explain_image_result, preset
 from backend_core.recycle_service import RecycleBinService, ReviewSigner
 
 
@@ -83,6 +84,31 @@ class ModelServiceTests(unittest.TestCase):
         for vector in vectors.values():
             self.assertEqual(vector.dtype, np.float32)
             self.assertAlmostEqual(float(np.linalg.norm(vector)), 1.0, places=6)
+
+    def test_text_encoding_uses_shared_normalized_space(self):
+        import torch
+
+        class FakeModel:
+            def parameters(self):
+                return iter([torch.nn.Parameter(torch.zeros(1))])
+
+            def encode_text(self, tokens):
+                return torch.tensor([[3.0, 4.0]] * len(tokens))
+
+        vectors = encode_texts(["snow", "forest"], FakeModel(), lambda texts: torch.ones((len(texts), 3), dtype=torch.long))
+        self.assertEqual(vectors.shape, (2, 2))
+        np.testing.assert_allclose(vectors[0], np.array([.6, .8], np.float32))
+
+    def test_threshold_presets_and_explanation_are_auditable(self):
+        self.assertEqual(preset("balanced")["cosine"], .86)
+        self.assertEqual(preset("balanced")["dhash_distance"], 8)
+        result = explain_image_result(
+            .99, "same", {"dhash": 1}, "same", {"dhash": 1}
+        )
+        self.assertEqual(result["category"], "重复")
+        self.assertIn("SHA-256", result["reason"])
+        with self.assertRaises(ValueError):
+            preset("missing")
 
 
 class RecycleServiceTests(unittest.TestCase):

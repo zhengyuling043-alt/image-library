@@ -40,6 +40,22 @@ from runtime_compat import LANCZOS, popcount
 from vector_index import threshold_pairs
 
 
+def _dhash(image):
+    gray = np.asarray(image.convert("L").resize((9, 8), LANCZOS))
+    value = 0
+    for bit in (gray[:, 1:] > gray[:, :-1]).ravel():
+        value = (value << 1) | int(bit)
+    return value
+
+
+def hash_distance(left, right):
+    """Minimum perceptual distance across full-frame and center-crop views."""
+
+    left_hashes = left.get("dhashes", [left["dhash"]])
+    right_hashes = right.get("dhashes", [right["dhash"]])
+    return min(popcount(a ^ b) for a in left_hashes for b in right_hashes)
+
+
 def inspect_image(path):
     """
     提取图片的元信息和感知哈希（dHash）。
@@ -70,18 +86,19 @@ def inspect_image(path):
         width, height = image.size
         # 转为灰度图（"L"模式）并缩放到 9x8，使用 Lanczos 抗锯齿算法
         grayscale = image.convert("L")
-        gray = np.asarray(grayscale.resize((9, 8), LANCZOS))
+        views = [image]
+        for ratio in (0.9, 0.8):
+            crop_width, crop_height = max(1, int(width * ratio)), max(1, int(height * ratio))
+            left, top = (width - crop_width) // 2, (height - crop_height) // 2
+            views.append(image.crop((left, top, left + crop_width, top + crop_height)))
         quality_preview = grayscale.copy()
         quality_preview.thumbnail((512, 512), LANCZOS)
         pixels = np.asarray(quality_preview, dtype=np.float32)
     # 64 位差分感知哈希：比较每行相邻像素的亮度变化方向
     # gray[:, 1:] 是第 1~8 列，gray[:, :-1] 是第 0~7 列
     # 逐元素比较后展平为一维布尔数组，True 表示右侧更亮（位=1）
-    bits = (gray[:, 1:] > gray[:, :-1]).ravel()
-    # 将 64 个布尔位拼接成一个 64 位整数
-    value = 0
-    for bit in bits:
-        value = (value << 1) | int(bit)
+    hashes = [_dhash(view) for view in views]
+    value = hashes[0]
     brightness = float(pixels.mean()) if pixels.size else 0.0
     horizontal = np.diff(pixels, axis=1) if pixels.shape[1] > 1 else np.zeros(1)
     vertical = np.diff(pixels, axis=0) if pixels.shape[0] > 1 else np.zeros(1)
@@ -93,7 +110,7 @@ def inspect_image(path):
     quality_score = round(100 * (0.65 * resolution_score +
                                  0.25 * sharpness_score +
                                  0.10 * exposure_score), 2)
-    return {"width": width, "height": height, "dhash": value,
+    return {"width": width, "height": height, "dhash": value, "dhashes": hashes,
             "quality_score": quality_score, "sharpness": round(sharpness, 2),
             "brightness": round(brightness, 2),
             "quality_components": {
@@ -149,7 +166,7 @@ def classify_pair(a, b, info, vectors, similarity, max_distance):
     # np.clip 防止浮点精度问题导致结果超出 [-1, 1] 理论范围
     score = float(np.clip(vectors[a] @ vectors[b], -1, 1))
     # 计算 dHash 的汉明距离：异或后统计不同位的数量
-    distance = popcount(info[a]["dhash"] ^ info[b]["dhash"])
+    distance = hash_distance(info[a], info[b])
     # 按优先级判定分类
     if info[a]["sha256"] == info[b]["sha256"]:
         # SHA-256 完全一致，文件级重复，最严格的类别
@@ -317,7 +334,7 @@ def generate_groups(library=LIBRARY, index_file=INDEX_FILE, similarity=0.94, max
     candidates, candidate_backend = threshold_pairs(names, vectors, similarity)
     for i, j, _score in candidates:
         a, b = names[i], names[j]
-        distance = popcount(info[a]["dhash"] ^ info[b]["dhash"])
+        distance = hash_distance(info[a], info[b])
         if info[a]["sha256"] == info[b]["sha256"] or distance <= max_distance:
             accepted.add((i, j))
         else:

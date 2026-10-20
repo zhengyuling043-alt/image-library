@@ -19,9 +19,8 @@ from evaluate_duplicates import (
     complete_link_cluster_measure,
     measure,
 )
-from group_duplicates import inspect_image
+from group_duplicates import hash_distance, inspect_image
 from incremental_search import EXTENSIONS, INDEX_FILE, LIBRARY, MODEL, ROOT, WEIGHTS, fingerprint, read_index
-from runtime_compat import popcount
 from vector_index import backend_name
 
 
@@ -71,7 +70,7 @@ def pair_rows(samples, vectors, info, split):
             "variant_b": right["transform"],
             "exact": info[a]["sha256"] == info[b]["sha256"],
             "cosine": float(np.clip(vectors[a] @ vectors[b], -1, 1)),
-            "distance": popcount(info[a]["dhash"] ^ info[b]["dhash"]),
+            "distance": hash_distance(info[a], info[b]),
         })
     return selected, rows
 

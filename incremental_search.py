@@ -131,6 +131,7 @@ class Encoder:
         """
         self.model = None
         self.preprocess = None  # 图片预处理函数，与模型配套
+        self.tokenizer = None
 
     def _ensure_loaded(self):
         from indexed_search import load_model
@@ -173,6 +174,16 @@ class Encoder:
         from backend_core.model_service import encode_image_paths
         self._ensure_loaded()
         return encode_image_paths(paths, self.model, self.preprocess, batch_size)
+
+    def encode_text(self, text):
+        """Encode an English text query in the image embedding space."""
+
+        import open_clip
+        from backend_core.model_service import encode_texts
+        self._ensure_loaded()
+        if self.tokenizer is None:
+            self.tokenizer = open_clip.get_tokenizer(MODEL)
+        return encode_texts([text], self.model, self.tokenizer)[0]
 
 
 def read_index(path):

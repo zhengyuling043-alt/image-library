@@ -65,7 +65,7 @@ function imageURL(name) {
   return "/api/thumbnail?name=" + encodeURIComponent(name) + "&v=" + encodeURIComponent(item?.version || "");
 }
 function sizeText(bytes) {return bytes >= 1024 * 1024 ? (bytes / 1024 / 1024).toFixed(1) + " MB" : Math.round(bytes / 1024) + " KB";}
-function card(item, {selectable = false, score, group, badge} = {}) {
+function card(item, {selectable = false, score, group, badge, reason, category} = {}) {
   const article = node("article", "image-card");
   article.classList.toggle("selected", state.selected.has(item.name) && selectable);
   const visual = node("div", "image-visual");
@@ -89,7 +89,9 @@ function card(item, {selectable = false, score, group, badge} = {}) {
   const meta = node("div", "image-meta");
   meta.append(node("span", "", item.width ? `${item.width} × ${item.height}` : "无法读取"));
   meta.append(node("span", "status-dot " + item.status, {ready: "● 已入库", pending: "● 待更新", failed: "● 读取失败"}[item.status] || ""));
-  info.append(name, meta); article.append(visual, info); return article;
+  info.append(name, meta);
+  if (reason) info.append(node("p", "match-explanation", `${category || "依据"} · ${reason}`));
+  article.append(visual, info); return article;
 }
 function updateSelection() {
   $("#export").textContent = `导出清单 (${state.selected.size})`;
@@ -151,7 +153,7 @@ $("#select-all").addEventListener("click", () => {
 $("#collapse-groups").addEventListener("change", () => {
   if (!$("#collapse-groups").checked) return renderLibrary();
   guarded("正在整理重复组视图…", async () => {
-    try {state.groups = await task("/api/groups", {similarity: .94, distance: 6}, "正在比较组内版本…");}
+    try {state.groups = await task("/api/groups", {preset: "balanced", similarity: .86, distance: 8}, "正在比较组内版本…");}
     catch (error) {$("#collapse-groups").checked = false; throw error;}
     finally {renderLibrary();}
   });
@@ -216,6 +218,12 @@ $("#search-submit").addEventListener("click", () => guarded("正在查找相似�
   renderSearch();
   if (lastSearch.skipped) notify(`跳过 ${lastSearch.skipped} 张已变化素材，请更新索引。`);
 }));
+$("#text-query").addEventListener("input", event => {$("#text-search-submit").disabled = !event.target.value.trim();});
+$("#text-search-submit").addEventListener("click", () => guarded("正在执行以文搜图…", async () => {
+  const text = $("#text-query").value.trim();
+  lastSearch = await task("/api/search-text", {text}, "正在编码文本并搜索共享向量空间…");
+  await refreshLibrary(); renderSearch();
+}));
 
 let lastSearch = null, searchMode = "single";
 function resetSearchView() {
@@ -227,7 +235,7 @@ function resetSearchView() {
   $("#search-empty h3").textContent = "从一张图片开始";
   $("#search-empty p").textContent = "选择参考图并点击查找，获取当前图片的结果。";
 }
-function searchCard(row) {const item = state.items.find(i => i.name === row.name); return item ? card(item, {score: row.score}) : node("span");}
+function searchCard(row) {const item = state.items.find(i => i.name === row.name); return item ? card(item, {score: row.score, reason: row.reason, category: row.category}) : node("span");}
 function clampThreshold(value) {return Math.min(1, Math.max(0, Number(value) || 0));}
 function renderSearch() {
   if (!lastSearch) return resetSearchView();
@@ -261,7 +269,7 @@ function renderSearchWarnings() {
   notice.hidden = false;
   notice.textContent = failures.length
     ? `以下 ${failures.length} 张未入库：` + failures.map(([name, reason]) => `${name}：${reason}`).join("；")
-    : "结果按模型相似度排序；题材相似不代表同一张图片。查询图片不会自动加入素材库。";
+    : `结果由 ${lastSearch.backend || "向量索引"} 排序；每张卡片显示模型分数与判定依据。`;
 }
 $("#search-sim").addEventListener("input", renderSearch);
 $("#search-left-sim").addEventListener("input", renderSearch);
@@ -272,6 +280,13 @@ document.querySelectorAll("[data-search-mode]").forEach(button => button.addEven
   $("#search-thresholds").hidden = searchMode !== "compare";
   renderSearch();
 }));
+
+const thresholdPresets = {strict: [.94, 6], balanced: [.86, 8], broad: [.78, 28]};
+$("#group-preset").addEventListener("change", event => {
+  const values = thresholdPresets[event.target.value];
+  if (values) {$("#group-sim").value = values[0]; $("#group-dist").value = values[1];}
+});
+for (const id of ["group-sim", "group-dist"]) $("#" + id).addEventListener("input", () => {$("#group-preset").value = "custom";});
 
 function parameters(prefix) {
   const sim = $("#" + prefix + "-sim"), dist = $("#" + prefix + "-dist");

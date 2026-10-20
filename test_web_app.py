@@ -47,6 +47,11 @@ class FakeEncoder:
         vector[0] = 1.0
         return vector
 
+    def encode_text(self, text):
+        vector = np.zeros(512, dtype=np.float32)
+        vector[0] = 1.0
+        return vector
+
 
 class WebAppTestCase(unittest.TestCase):
     def test_new_unnumbered_upload_searches_without_manual_update(self):
@@ -56,6 +61,16 @@ class WebAppTestCase(unittest.TestCase):
         self.assertEqual(result["results"][0]["name"], "假日海边.png")
         self.assertAlmostEqual(result["results"][0]["score"], 1.0, places=5)
         self.assertEqual(self.app.snapshot()["ready"], 1)
+
+    def test_image_and_text_results_include_explanations(self):
+        data = png_bytes()
+        self.app.upload({"name": "reference.png", "data": b64(data)})
+        image_result = self.app.query(data)["results"][0]
+        self.assertEqual(image_result["category"], "重复")
+        self.assertIn("SHA-256", image_result["reason"])
+        text_result = self.app.query_text("a reference image")["results"][0]
+        self.assertEqual(text_result["name"], "reference.png")
+        self.assertIn("OpenCLIP", text_result["reason"])
 
     def test_groups_and_compare_skip_bad_image_and_sync_new_copies(self):
         data = png_bytes()

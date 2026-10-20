@@ -7,10 +7,27 @@ import numpy as np
 from PIL import Image
 
 from incremental_search import fingerprint, save_index
-from group_duplicates import complete_groups, generate_groups, classify_pair, inspect_image
+from group_duplicates import complete_groups, generate_groups, classify_pair, hash_distance, inspect_image
+from runtime_compat import popcount
 
 
 class GroupingTests(unittest.TestCase):
+    def test_multiview_hash_is_robust_to_center_crop(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            original = Image.new("RGB", (200, 140), "white")
+            for x in range(20, 180, 20):
+                for y in range(20, 120, 20):
+                    original.paste((x, y, (x + y) % 255), (x, y, x + 12, y + 12))
+            original_path = root / "original.png"
+            crop_path = root / "crop.png"
+            original.save(original_path)
+            original.crop((20, 14, 180, 126)).resize((200, 140)).save(crop_path)
+            left, right = inspect_image(original_path), inspect_image(crop_path)
+            plain = popcount(left["dhash"] ^ right["dhash"])
+            robust = hash_distance(left, right)
+            self.assertLessEqual(robust, plain)
+            self.assertIn("dhashes", left)
     def test_chain_does_not_merge(self):
         edges = {frozenset(("a", "b")), frozenset(("b", "c"))}
         groups = complete_groups(["c", "b", "a"], lambda a, b: frozenset((a, b)) in edges)

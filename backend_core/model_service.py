@@ -161,3 +161,24 @@ def encode_image_paths(paths, model, preprocess, batch_size=None):
                 vectors[path] = vector
     return vectors, failures
 
+
+def encode_texts(texts, model, tokenizer):
+    """Encode text in the same normalized OpenCLIP space as library images."""
+
+    import torch
+
+    texts = [str(text).strip() for text in texts]
+    if not texts or any(not text for text in texts):
+        raise ValueError("检索文本不能为空")
+    tokens = tokenizer(texts).to(_model_device(model))
+    with torch.inference_mode():
+        vectors = model.encode_text(tokens)
+        norms = vectors.norm(dim=-1, keepdim=True)
+        if torch.any(~torch.isfinite(vectors)) or torch.any(norms <= 0):
+            raise RuntimeError("模型返回了无效文本向量")
+        vectors = vectors / norms
+    result = vectors.detach().cpu().numpy().astype(np.float32, copy=False)
+    if result.ndim != 2 or not np.isfinite(result).all():
+        raise RuntimeError("文本向量格式无效")
+    return result
+
