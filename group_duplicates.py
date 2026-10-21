@@ -40,10 +40,28 @@ from runtime_compat import LANCZOS, popcount
 from vector_index import threshold_pairs
 
 
+COLOR_DISTANCE_THRESHOLD = 0.12
+
+
 def _dhash(image):
     gray = np.asarray(image.convert("L").resize((9, 8), LANCZOS))
     value = 0
     for bit in (gray[:, 1:] > gray[:, :-1]).ravel():
+        value = (value << 1) | int(bit)
+    return value
+
+
+def _phash(image):
+    """64-bit perceptual hash from low-frequency DCT coefficients."""
+
+    pixels = np.asarray(image.convert("L").resize((32, 32), LANCZOS), dtype=np.float32)
+    coordinates = np.arange(32, dtype=np.float32)
+    frequencies = np.arange(8, dtype=np.float32)[:, None]
+    basis = np.cos((2 * coordinates + 1) * frequencies * np.pi / 64)
+    coefficients = basis @ pixels @ basis.T
+    median = float(np.median(coefficients.ravel()[1:]))
+    value = 0
+    for bit in (coefficients > median).ravel():
         value = (value << 1) | int(bit)
     return value
 
@@ -54,6 +72,33 @@ def hash_distance(left, right):
     left_hashes = left.get("dhashes", [left["dhash"]])
     right_hashes = right.get("dhashes", [right["dhash"]])
     return min(popcount(a ^ b) for a in left_hashes for b in right_hashes)
+
+
+def phash_distance(left, right):
+    left_hashes = left.get("phashes", [left.get("phash", 0)])
+    right_hashes = right.get("phashes", [right.get("phash", 0)])
+    return min(popcount(a ^ b) for a in left_hashes for b in right_hashes)
+
+
+def color_distance(left, right):
+    """Euclidean distance between brightness-normalized RGB means."""
+
+    if "color_signature" not in left or "color_signature" not in right:
+        return 0.0
+    return float(np.linalg.norm(np.asarray(left["color_signature"], np.float32) -
+                                np.asarray(right["color_signature"], np.float32)))
+
+
+def near_duplicate_decision(score, dhash_value, phash_value, chroma_value,
+                            similarity, max_distance):
+    """Four-signal decision plus a guarded local-overlay recovery rule."""
+
+    primary = (score >= similarity and dhash_value <= max_distance and
+               phash_value <= 12 and chroma_value <= COLOR_DISTANCE_THRESHOLD)
+    local_overlay = (score >= max(0.75, similarity - 0.15) and
+                     dhash_value <= max_distance and phash_value <= 6 and
+                     chroma_value <= 0.08)
+    return primary or local_overlay
 
 
 def inspect_image(path):
@@ -87,10 +132,16 @@ def inspect_image(path):
         # 转为灰度图（"L"模式）并缩放到 9x8，使用 Lanczos 抗锯齿算法
         grayscale = image.convert("L")
         views = [image]
-        for ratio in (0.9, 0.8):
+        # Wider crops cover ordinary framing changes; tighter center views make
+        # the hash resilient to corner watermarks without ignoring global color.
+        for ratio in (0.9, 0.8, 0.7, 0.6):
             crop_width, crop_height = max(1, int(width * ratio)), max(1, int(height * ratio))
             left, top = (width - crop_width) // 2, (height - crop_height) // 2
             views.append(image.crop((left, top, left + crop_width, top + crop_height)))
+        color_preview = image.convert("RGB")
+        color_preview.thumbnail((128, 128), LANCZOS)
+        rgb_mean = np.asarray(color_preview, dtype=np.float32).reshape(-1, 3).mean(axis=0)
+        color_signature = (rgb_mean / max(float(rgb_mean.sum()), 1e-6)).tolist()
         quality_preview = grayscale.copy()
         quality_preview.thumbnail((512, 512), LANCZOS)
         pixels = np.asarray(quality_preview, dtype=np.float32)
@@ -98,6 +149,7 @@ def inspect_image(path):
     # gray[:, 1:] 是第 1~8 列，gray[:, :-1] 是第 0~7 列
     # 逐元素比较后展平为一维布尔数组，True 表示右侧更亮（位=1）
     hashes = [_dhash(view) for view in views]
+    phashes = [_phash(view) for view in views]
     value = hashes[0]
     brightness = float(pixels.mean()) if pixels.size else 0.0
     horizontal = np.diff(pixels, axis=1) if pixels.shape[1] > 1 else np.zeros(1)
@@ -111,6 +163,8 @@ def inspect_image(path):
                                  0.25 * sharpness_score +
                                  0.10 * exposure_score), 2)
     return {"width": width, "height": height, "dhash": value, "dhashes": hashes,
+            "phash": phashes[0], "phashes": phashes,
+            "color_signature": color_signature,
             "quality_score": quality_score, "sharpness": round(sharpness, 2),
             "brightness": round(brightness, 2),
             "quality_components": {
@@ -167,21 +221,26 @@ def classify_pair(a, b, info, vectors, similarity, max_distance):
     score = float(np.clip(vectors[a] @ vectors[b], -1, 1))
     # 计算 dHash 的汉明距离：异或后统计不同位的数量
     distance = hash_distance(info[a], info[b])
+    perceptual_distance = phash_distance(info[a], info[b])
+    chroma_distance = color_distance(info[a], info[b])
     # 按优先级判定分类
     if info[a]["sha256"] == info[b]["sha256"]:
         # SHA-256 完全一致，文件级重复，最严格的类别
         category, reason = "exact", "SHA-256一致，文件内容完全相同"
-    elif score >= similarity and distance <= max_distance:
+    elif near_duplicate_decision(score, distance, perceptual_distance, chroma_distance,
+                                 similarity, max_distance):
         # 向量相似度和结构相似度都达标，判定为近重复
-        category, reason = "near", "CLIP语义与dHash视觉结构均达到阈值"
+        category, reason = "near", "CLIP语义、多视图dHash/pHash结构与RGB色度共同通过"
     elif score >= similarity:
         # 仅向量相似度达标，语义相似但视觉结构差异较大
-        category, reason = "similar", "CLIP语义相似，但dHash结构差异超过近重复阈值"
+        category, reason = "similar", "CLIP语义相似，但结构或色度未通过近重复安全门"
     else:
         # 不满足任何相似条件
         category, reason = "other", "未达到重复或相似阈值"
     return {"a": a, "b": b, "category": category,
-            "cosine": score, "dhash_distance": distance, "reason": reason}
+            "cosine": score, "dhash_distance": distance,
+            "phash_distance": perceptual_distance,
+            "color_distance": round(chroma_distance, 6), "reason": reason}
 
 
 def complete_groups(names, matches):
@@ -331,11 +390,15 @@ def generate_groups(library=LIBRARY, index_file=INDEX_FILE, similarity=0.94, max
     # accepted保存稀疏候选边，内存不再固定为N×N。
     accepted = set()
     similar_pairs, similar_count = [], 0
-    candidates, candidate_backend = threshold_pairs(names, vectors, similarity)
+    candidates, candidate_backend = threshold_pairs(names, vectors, min(similarity, 0.75))
     for i, j, _score in candidates:
         a, b = names[i], names[j]
         distance = hash_distance(info[a], info[b])
-        if info[a]["sha256"] == info[b]["sha256"] or distance <= max_distance:
+        perceptual_distance = phash_distance(info[a], info[b])
+        chroma_distance = color_distance(info[a], info[b])
+        if (info[a]["sha256"] == info[b]["sha256"] or
+                near_duplicate_decision(_score, distance, perceptual_distance, chroma_distance,
+                                        similarity, max_distance)):
             accepted.add((i, j))
         else:
             similar_count += 1

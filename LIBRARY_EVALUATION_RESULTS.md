@@ -1,6 +1,6 @@
 # 500张素材库重复检测评测
 
-现有500张素材库的独立测试评测；阈值只使用calibration分区选择。
+现有500张来源派生素材的回归评测；曾用于定位裁剪问题，不再宣称为最终独立盲测。
 
 Groups are source-derived labels; different sources need manual near-duplicate review. Not an accuracy report.
 
@@ -8,17 +8,17 @@ Groups are source-derived labels; different sources need manual near-duplicate r
 
 - 清单、磁盘和索引一致：500 张，索引指纹全部有效。
 - 调参集：336 张 / 72 个来源 / 56280 个图片对。
-- 独立测试集：164 张 / 36 个来源 / 13366 个图片对。
+- 回归测试分区：164 张 / 36 个来源 / 13366 个图片对。
 - 模型：`ViT-B-32-quickgelu` / `openai`，512维；检索后端：`faiss-persistent-idmap2`。
 
 ## 阈值选择
 
 仅用调参集；查准率至少98%的候选中优先召回率和F1，仍并列时选择更严格参数。
-选出参数：余弦相似度 `0.86`，dHash距离 `≤ 8`。
+选出参数：余弦相似度 `0.96`，dHash距离 `≤ 4`。
 
-| 独立测试集 | 查准率 | 召回率 | F1 | 误判对 | 漏判对 |
+| 回归测试分区 | 查准率 | 召回率 | F1 | 误判对 | 漏判对 |
 |---|---:|---:|---:|---:|---:|
-| 默认 0.94 / 6 | 100.00% | 89.67% | 0.9456 | 0 | 38 |
+| 默认 0.94 / 6 | 100.00% | 100.00% | 1.0000 | 0 | 0 |
 | 调参集选出参数 | 100.00% | 100.00% | 1.0000 | 0 | 0 |
 
 ## 传递性处理对比
@@ -40,4 +40,4 @@ Groups are source-derived labels; different sources need manual near-duplicate r
 | watermark | 8 / 8 | 100.00% |
 
 详细阈值网格、错误图片对和原始数值见 `LIBRARY_EVALUATION_RESULTS.json`。
-该报告不会使用独立测试集反复调参；若算法改变，应重新保留一批未参与开发的来源图进行验收。
+最终未调参验收见 `FINAL_HOLDOUT_RESULTS.md`；本报告仅用于500张固定素材的回归检查。

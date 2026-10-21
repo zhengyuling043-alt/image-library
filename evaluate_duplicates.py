@@ -9,11 +9,14 @@ from pathlib import Path
 import numpy as np
 from PIL import Image, ImageDraw, ImageEnhance, ImageOps
 
-from group_duplicates import complete_groups, inspect_image
+from group_duplicates import (
+    color_distance, complete_groups, hash_distance, inspect_image,
+    near_duplicate_decision, phash_distance,
+)
 from incremental_search import (
     ROOT, LIBRARY, EXTENSIONS, fingerprint, read_index, update_index,
 )
-from runtime_compat import LANCZOS, popcount
+from runtime_compat import LANCZOS
 
 DEFAULT_DATASET = ROOT / "data" / "evaluation"
 VARIANTS = ("original", "copy", "resize", "brightness", "crop", "watermark", "jpeg")
@@ -122,7 +125,9 @@ def measure(rows, similarity, distance):
     counts = dict(tp=0, fp=0, fn=0, tn=0)
     errors = []
     for row in rows:
-        predicted = row["exact"] or (row["cosine"] >= similarity and row["distance"] <= distance)
+        predicted = row["exact"] or near_duplicate_decision(
+            row["cosine"], row["distance"], row.get("phash_distance", 0),
+            row.get("color_distance", 0), similarity, distance)
         key = ("tp" if row["positive"] else "fp") if predicted else ("fn" if row["positive"] else "tn")
         counts[key] += 1
         if key in {"fp", "fn"}:
@@ -159,7 +164,9 @@ def cluster_measure(rows, similarity, distance):
     truth_links = [(row["a"], row["b"]) for row in rows if row["positive"]]
     predicted_links = [
         (row["a"], row["b"]) for row in rows
-        if row["exact"] or (row["cosine"] >= similarity and row["distance"] <= distance)
+        if row["exact"] or near_duplicate_decision(
+            row["cosine"], row["distance"], row.get("phash_distance", 0),
+            row.get("color_distance", 0), similarity, distance)
     ]
     truth, predicted = clusters(truth_links), clusters(predicted_links)
     truth_id = {name: index for index, group in enumerate(truth) for name in group}
@@ -228,7 +235,9 @@ def complete_link_cluster_measure(rows, similarity, distance):
 
     def predicted_pair(a, b):
         row = lookup[frozenset((a, b))]
-        return row["exact"] or (row["cosine"] >= similarity and row["distance"] <= distance)
+        return row["exact"] or near_duplicate_decision(
+            row["cosine"], row["distance"], row.get("phash_distance", 0),
+            row.get("color_distance", 0), similarity, distance)
 
     def units_match(a, b):
         return all(predicted_pair(left, right) for left in units[a] for right in units[b])
@@ -276,7 +285,9 @@ def pair_rows(dataset, split, samples):
                      "variant_a": a["variant"], "variant_b": b["variant"],
                      "exact": records[na]["sha256"] == records[nb]["sha256"],
                      "cosine": float(np.clip(vectors[na] @ vectors[nb], -1, 1)),
-                     "distance": popcount(info[na]["dhash"] ^ info[nb]["dhash"])})
+                     "distance": hash_distance(info[na], info[nb]),
+                     "phash_distance": phash_distance(info[na], info[nb]),
+                     "color_distance": color_distance(info[na], info[nb])})
     return rows
 
 

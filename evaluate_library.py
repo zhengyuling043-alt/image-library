@@ -19,7 +19,7 @@ from evaluate_duplicates import (
     complete_link_cluster_measure,
     measure,
 )
-from group_duplicates import hash_distance, inspect_image
+from group_duplicates import color_distance, hash_distance, inspect_image, phash_distance
 from incremental_search import EXTENSIONS, INDEX_FILE, LIBRARY, MODEL, ROOT, WEIGHTS, fingerprint, read_index
 from vector_index import backend_name
 
@@ -71,6 +71,8 @@ def pair_rows(samples, vectors, info, split):
             "exact": info[a]["sha256"] == info[b]["sha256"],
             "cosine": float(np.clip(vectors[a] @ vectors[b], -1, 1)),
             "distance": hash_distance(info[a], info[b]),
+            "phash_distance": phash_distance(info[a], info[b]),
+            "color_distance": color_distance(info[a], info[b]),
         })
     return selected, rows
 
@@ -120,7 +122,7 @@ def evaluate(library=LIBRARY, index_file=INDEX_FILE, manifest_file=MANIFEST,
         per_variant[variant] = compact_metrics(measure(subset, similarity, distance))
 
     result = {
-        "scope": "现有500张素材库的独立测试评测；阈值只使用calibration分区选择。",
+        "scope": "现有500张来源派生素材的回归评测；曾用于定位裁剪问题，不再宣称为最终独立盲测。",
         "assumption": manifest.get("note", "同一source_id视为同组标准答案。"),
         "integrity": {
             "manifest_images": len(manifest["files"]),
@@ -164,12 +166,12 @@ def evaluate(library=LIBRARY, index_file=INDEX_FILE, manifest_file=MANIFEST,
         "## 数据与环境", "",
         f"- 清单、磁盘和索引一致：{len(records)} 张，索引指纹全部有效。",
         f"- 调参集：{len(calibration_samples)} 张 / {result['splits']['calibration']['sources']} 个来源 / {len(calibration_rows)} 个图片对。",
-        f"- 独立测试集：{len(test_samples)} 张 / {result['splits']['test']['sources']} 个来源 / {len(test_rows)} 个图片对。",
+        f"- 回归测试分区：{len(test_samples)} 张 / {result['splits']['test']['sources']} 个来源 / {len(test_rows)} 个图片对。",
         f"- 模型：`{MODEL}` / `{WEIGHTS}`，{result['environment']['vector_dimension']}维；检索后端：`{result['environment']['search_backend']}`。",
         "", "## 阈值选择", "",
         rule + "。",
         f"选出参数：余弦相似度 `{similarity}`，dHash距离 `≤ {distance}`。", "",
-        "| 独立测试集 | 查准率 | 召回率 | F1 | 误判对 | 漏判对 |",
+        "| 回归测试分区 | 查准率 | 召回率 | F1 | 误判对 | 漏判对 |",
         "|---|---:|---:|---:|---:|---:|",
         f"| 默认 0.94 / 6 | {percent(baseline['precision'])} | {percent(baseline['recall'])} | {baseline['f1']:.4f} | {baseline['fp']} | {baseline['fn']} |",
         f"| 调参集选出参数 | {percent(selected['precision'])} | {percent(selected['recall'])} | {selected['f1']:.4f} | {selected['fp']} | {selected['fn']} |",
@@ -185,7 +187,7 @@ def evaluate(library=LIBRARY, index_file=INDEX_FILE, manifest_file=MANIFEST,
         expected = metrics["tp"] + metrics["fn"]
         lines.append(f"| {variant} | {metrics['tp']} / {expected} | {percent(metrics['recall'])} |")
     lines += ["", "详细阈值网格、错误图片对和原始数值见 `LIBRARY_EVALUATION_RESULTS.json`。",
-              "该报告不会使用独立测试集反复调参；若算法改变，应重新保留一批未参与开发的来源图进行验收。", ""]
+              "最终未调参验收见 `FINAL_HOLDOUT_RESULTS.md`；本报告仅用于500张固定素材的回归检查。", ""]
     Path(markdown_report).write_text("\n".join(lines), encoding="utf-8")
     return result
 
