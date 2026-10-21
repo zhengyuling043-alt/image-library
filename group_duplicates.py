@@ -30,7 +30,9 @@
 """
 import argparse
 import json
+from functools import lru_cache
 from itertools import combinations, islice
+from pathlib import Path
 
 import numpy as np
 from PIL import Image, ImageOps
@@ -101,6 +103,21 @@ def near_duplicate_decision(score, dhash_value, phash_value, chroma_value,
     return primary or local_overlay
 
 
+@lru_cache(maxsize=2048)
+def _inspect_cached(path_str, mtime_ns, size):
+    """带缓存的图片信息提取（内部函数）。
+
+    参数:
+        path_str (str): 图片文件路径（字符串以支持 lru_cache 哈希）
+        mtime_ns (int): 文件修改时间（纳秒），缓存失效依据
+        size (int): 文件大小（字节），缓存失效依据
+
+    返回:
+        dict: inspect_image 的完整结果
+    """
+    return _inspect_image_impl(Path(path_str))
+
+
 def inspect_image(path):
     """
     提取图片的元信息和感知哈希（dHash）。
@@ -125,6 +142,17 @@ def inspect_image(path):
         3. 共 8 行 x 8 个比较 = 64 位，拼接成一个整数
         4. 该哈希对轻微的颜色变化、压缩质量差异具有鲁棒性
     """
+    # 性能关键：磁盘文件哈希结果按 (路径, 修改时间, 大小) 缓存。
+    # 素材文件未变化时，搜索/分组反复调用只解码一次，避免重复读盘。
+    try:
+        stat_result = Path(path).stat()
+        return _inspect_cached(str(path), stat_result.st_mtime_ns, stat_result.st_size)
+    except OSError:
+        return _inspect_cached(str(path), 0, 0)
+
+
+def _inspect_image_impl(path):
+    """inspect_image 的真实实现，由带缓存的包装调用。"""
     with Image.open(path) as source:
         # 根据 EXIF Orientation 标签自动旋转图片，保证方向正确
         image = ImageOps.exif_transpose(source)
@@ -452,6 +480,10 @@ def generate_groups(library=LIBRARY, index_file=INDEX_FILE, similarity=0.94, max
                        "members": members, "representative": representative,
                        "suggested_keep": keeper,
                        "quality_scores": {name: info[name]["quality_score"] for name in members},
+                       # 推荐保留项的完整质量指标（前端展示与答辩用）
+                       "keeper_detail": {key: info[keeper].get(key)
+                                         for key in ("quality_score", "width", "height",
+                                                     "sharpness", "brightness")},
                        "keep_reason": (
                            f"综合质量分 {keeper_info['quality_score']:.2f}："
                            f"{keeper_info['width']}×{keeper_info['height']}，"

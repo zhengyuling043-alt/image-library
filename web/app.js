@@ -47,8 +47,8 @@ async function task(path, body, message) {
 async function guarded(message, work) {
   if (state.busy) return notify("已有任务正在运行，请稍候");
   setBusy(true, message);
-  const status = $("#operation-status"); status.hidden = false; status.textContent = message;
-  try {await work(); status.textContent = "操作完成。";} catch (error) {status.textContent = "操作失败：" + error.message; notify(error.message, true);}
+  const status = $("#operation-status"); status.hidden = true; status.textContent = "";
+  try {await work();} catch (error) {notify(error.message, true);}
   finally {setBusy(false);}
 }
 function changePage(page) {
@@ -65,7 +65,7 @@ function imageURL(name) {
   return "/api/thumbnail?name=" + encodeURIComponent(name) + "&v=" + encodeURIComponent(item?.version || "");
 }
 function sizeText(bytes) {return bytes >= 1024 * 1024 ? (bytes / 1024 / 1024).toFixed(1) + " MB" : Math.round(bytes / 1024) + " KB";}
-function card(item, {selectable = false, score, group, badge, reason, category} = {}) {
+function card(item, {selectable = false, score, group, badge, reason, category, interpretation} = {}) {
   const article = node("article", "image-card");
   article.classList.toggle("selected", state.selected.has(item.name) && selectable);
   const visual = node("div", "image-visual");
@@ -235,7 +235,7 @@ function resetSearchView() {
   $("#search-empty h3").textContent = "从一张图片开始";
   $("#search-empty p").textContent = "选择参考图并点击查找，获取当前图片的结果。";
 }
-function searchCard(row) {const item = state.items.find(i => i.name === row.name); return item ? card(item, {score: row.score, reason: row.reason, category: row.category}) : node("span");}
+function searchCard(row) {const item = state.items.find(i => i.name === row.name); return item ? card(item, {score: row.score, reason: row.reason, category: row.category, interpretation: row.interpretation}) : node("span");}
 function clampThreshold(value) {return Math.min(1, Math.max(0, Number(value) || 0));}
 function renderSearch() {
   if (!lastSearch) return resetSearchView();
@@ -266,10 +266,9 @@ function renderSearch() {
 function renderSearchWarnings() {
   const failures = Object.entries(lastSearch.failures || {});
   const notice = $("#search-notice");
+  if (!failures.length) {notice.hidden = true; notice.textContent = ""; return;}
   notice.hidden = false;
-  notice.textContent = failures.length
-    ? `以下 ${failures.length} 张未入库：` + failures.map(([name, reason]) => `${name}：${reason}`).join("；")
-    : `结果由 ${lastSearch.backend || "向量索引"} 排序；每张卡片显示模型分数与判定依据。`;
+  notice.textContent = `以下 ${failures.length} 张未入库：` + failures.map(([name, reason]) => `${name}：${reason}`).join("；");
 }
 $("#search-sim").addEventListener("input", renderSearch);
 $("#search-left-sim").addEventListener("input", renderSearch);
@@ -321,7 +320,18 @@ function groupCard(group, allowCleanup = true) {
   }
   const evidence = node("details", "evidence"); evidence.append(node("summary", "", "查看判定依据"));
   group.pairs.forEach(pair => evidence.append(node("p", "", `${pair.a} ↔ ${pair.b}：${pair.reason || (pair.category === "exact" ? "文件内容相同" : "近重复候选")}；相似度 ${pair.cosine.toFixed(4)}；哈希距离 ${pair.dhash_distance}`)));
-  box.append(header, images, node("p", "group-reason", `推荐依据：${group.keep_reason || "综合质量评分后仍需人工确认"}；组代表图：${group.representative || group.suggested_keep}`));
+  const keep = group.suggested_keep, keepScore = group.quality_scores?.[keep];
+  const kd = group.keeper_detail || {};
+  const keepMetrics = [
+    `质量分 ${keepScore?.toFixed(2) ?? "—"}`,
+    kd.width && kd.height ? `${kd.width}×${kd.height}` : "",
+    kd.sharpness != null ? `清晰度 ${kd.sharpness.toFixed(2)}` : "",
+    kd.brightness != null ? `亮度 ${kd.brightness.toFixed(2)}` : "",
+  ].filter(Boolean).join("；");
+  const keepInfo = node("p", "group-reason",
+    `推荐保留：${keep}（${keepMetrics}，为组内综合质量最高）；组代表图：${group.representative || keep}。` +
+    `选择依据：综合质量分优先，最终由人工确认。`);
+  box.append(header, images, keepInfo);
   if (allowCleanup) {const label = node("label", "keeper-label", "本次保留："); label.append(keeper); box.append(label);}
   if (group.pair_count > group.pairs.length) evidence.append(node("p", "", `共 ${group.pair_count} 对关系，此处展示前 ${group.pairs.length} 对依据。`));
   box.append(evidence); return box;

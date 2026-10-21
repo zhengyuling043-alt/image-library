@@ -1,6 +1,14 @@
 """性能基准测试：按课程要求分 500/2000/5000 张三档素材库规模，验证性能指标。
 
-测什么（对应性能测试 5 项要求）：
+【测试图片来源】本脚本不依赖任何真实素材：
+  图片全部由下方 make_image() 程序合成（随机色块图，每张几毫秒），
+  生成在临时目录（tempfile.TemporaryDirectory），测试结束自动删除，
+  全程不碰 data/library 中的真实素材库，也不会污染正式索引。
+  真实 CLIP 模型从本地权重 data/models/open_clip_pytorch_model.bin 加载。
+
+【测试结果去向】每次运行写入项目根目录 perf_results_<规模>.json（UTF-8），
+  例如 py -s perf_benchmark.py 500 → perf_results_500.json。
+  各字段含义（对应性能测试 5 项要求）：
   full_build_sec            批量入库总耗时（全量建索引：SHA-256 扫描 + CLIP 编码 + 保存）；
   incremental_add_N_sec     增量更新耗时——新增 10% 图片只编码新图，与全量对比证明增量索引优势；
   search_sec                以图搜图响应时间（查询图编码 + 全库余弦比对 + 排序，要求秒级）；
@@ -8,9 +16,10 @@
   mem_*_mb                  内存占用（RSS 实测：模型加载前后、峰值）；
   index_file_mb             向量索引磁盘占用（验证素材量增长对存储的影响）。
 
+【已知问题】内存读数（mem_*_mb）在部分 Windows 环境读不到，结果为 0.0，
+  使用前请先验证 rss_mb() 是否返回有效值；详见下方 rss_mb() 注释。
+
 用法：py -s perf_benchmark.py <规模>   （例如 py -s perf_benchmark.py 500）
-结果写入 perf_results_<规模>.json，过程日志打到标准输出。
-素材为程序合成的随机色块图，跑在临时目录，不碰真实素材库；真实 CLIP 从本地权重加载。
 """
 
 import sys

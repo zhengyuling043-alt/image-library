@@ -65,6 +65,9 @@ from incremental_search import (
     fingerprint, read_index, save_index, update_index,
 )
 from runtime_compat import LANCZOS
+
+# 缩略图磁盘缓存目录：生成后落盘，重启/滚动浏览均直接复用，避免反复 PIL 解码大图
+THUMB_CACHE_DIR = Path(ROOT) / "data" / "cache" / "thumbs"
 from metadata_store import MetadataStore
 from vector_index import backend_name, rank_persistent
 from backend_core.recycle_service import RecycleBinService
@@ -148,7 +151,7 @@ def decode_image(payload):
 @lru_cache(maxsize=160)
 def thumbnail(path, modified, size):
     """
-    生成图片缩略图，带 LRU 缓存以提高性能。
+    生成图片缩略图，带 LRU 缓存与磁盘持久化缓存以提高性能。
 
     参数:
         path (str): 图片文件的完整路径
@@ -159,16 +162,23 @@ def thumbnail(path, modified, size):
         bytes: JPEG 格式的缩略图二进制数据
 
     缓存策略:
-        - 使用 lru_cache 缓存最近 160 个缩略图
-        - 缓存键包含路径、修改时间和大小，任一变化则重新生成
-        - 适合前端列表页快速预览，避免重复处理
-
-    处理流程:
-        1. 根据 EXIF 信息自动旋转图片方向
-        2. 转换为 RGB 模式（去除 alpha 通道）
-        3. 使用高质量 Lanczos 算法缩放至 640x480 以内
-        4. 以 82% 质量保存为 JPEG 格式
+        - 内存层：lru_cache 缓存最近 160 个缩略图
+        - 磁盘层：data/cache/thumbs 下按文件名缓存 JPEG 文件，
+          键包含修改时间与大小，任一变化则重新生成；
+          浏览器滚动、重启服务后直接读盘，避免反复解码大图（主要性能瓶颈）
+        - 磁盘写文件使用临时文件 + 原子替换，避免多线程并发写坏
     """
+    cache_dir = THUMB_CACHE_DIR
+    cache_file = cache_dir / Path(path).name
+    # 缓存键元数据存放在同名 .json 中，用于失效判断
+    meta_file = cache_file.with_suffix(cache_file.suffix + ".json")
+    if cache_file.is_file() and meta_file.is_file():
+        try:
+            meta = json.loads(meta_file.read_text(encoding="utf-8"))
+            if meta.get("modified") == modified and meta.get("size") == size:
+                return cache_file.read_bytes()
+        except (OSError, ValueError):
+            pass
     with Image.open(path) as image:
         # exif_transpose 根据 EXIF Orientation 标签自动旋转，保证方向正确
         image = ImageOps.exif_transpose(image).convert("RGB")
@@ -176,7 +186,18 @@ def thumbnail(path, modified, size):
         image.thumbnail((640, 480), LANCZOS)
         buffer = io.BytesIO()
         image.save(buffer, "JPEG", quality=82)
-        return buffer.getvalue()
+        data = buffer.getvalue()
+    # 原子写入磁盘缓存：先写临时文件再重命名，避免并发读取到半截文件
+    try:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        tmp = cache_file.with_suffix(cache_file.suffix + ".tmp")
+        tmp.write_bytes(data)
+        tmp.replace(cache_file)
+        meta_file.write_text(json.dumps({"modified": modified, "size": size}), encoding="utf-8")
+    except OSError:
+        pass  # 磁盘缓存失败不影响正常响应，仅失去加速效果
+    return data
+
 
 
 class LibraryApp:
@@ -252,6 +273,9 @@ class LibraryApp:
             metadata=self.metadata,
         )
         self.group_metadata = {}
+        # 重复分组结果缓存：键为 (cosine, distance, 索引文件指纹)，素材未变化时复用
+        self._groups_cache_key = None
+        self._groups_cache_result = None
         # 兼容升级前已存在的 NPZ 索引：首次启动时直接补齐 SQLite 目录，
         # 不重新加载模型或编码图片。后续更新由 update_index 持续同步。
         if self.index.is_file() and self.metadata.stats()["active"] == 0:
@@ -553,11 +577,11 @@ class LibraryApp:
             query_sha = fingerprint(query)
             query_info = inspect_image(query)
         valid_records, valid_vectors, skipped = {}, {}, 0
-        # 遍历索引中的每张图片
+        # 遍历索引中的每张图片；sync_index 已保证索引与磁盘一致，
+        # 这里只校验文件存在，避免对每张图重新读文件计算 SHA-256（性能关键）
         for name, record in records.items():
             path = safe_file(self.library, name)
-            # 跳过文件不存在或指纹不匹配的记录（文件已变化）
-            if not path.is_file() or fingerprint(path) != record["sha256"]:
+            if not path.is_file():
                 skipped += 1
                 continue
             valid_records[name], valid_vectors[name] = record, vectors[name]
@@ -654,6 +678,19 @@ class LibraryApp:
         update = self.sync_index() if sync else {"failures": {}}
         if not self.index.exists():
             raise ValueError("素材库为空，请先导入图片")
+        # 结果缓存：分组是全量重算（500 张图需逐张解码+两两比较），是最耗时的操作。
+        # 缓存键取 (阈值, 索引文件修改时间, 索引文件大小)——素材变化会重写索引，
+        # 因此索引文件的 mtime/size 可作为素材是否变化的廉价代理。
+        # 阈值不同、或素材有任何增删改，缓存自动失效并重算。
+        cache_key = None
+        try:
+            index_stat = self.index.stat()
+            cache_key = (cosine, distance, index_stat.st_mtime_ns, index_stat.st_size)
+        except OSError:
+            pass
+        if cache_key is not None and self._groups_cache_key == cache_key \
+                and self._groups_cache_result is not None:
+            return self._groups_cache_result
         report = generate_groups(self.library, self.index, cosine, distance, write_report=False, skip_invalid=True)
         for group in report["groups"]:
             review = {"thresholds": report["thresholds"],
@@ -666,12 +703,15 @@ class LibraryApp:
                     "quality_score": group.get("quality_scores", {}).get(name),
                     "suggested_keep": name == group["suggested_keep"],
                 }
-        return {"groups": report["groups"], "singletons": report["singletons"],
-                "thresholds": report["thresholds"], "total": len(report["images"]),
-                "candidate_backend": report.get("candidate_backend"),
-                "candidate_pair_count": report.get("candidate_pair_count", 0),
-                "similar_pair_count": report.get("similar_pair_count", 0),
-                "skipped": {**report["skipped"], **update["failures"]}}
+        result = {"groups": report["groups"], "singletons": report["singletons"],
+                  "thresholds": report["thresholds"], "total": len(report["images"]),
+                  "candidate_backend": report.get("candidate_backend"),
+                  "candidate_pair_count": report.get("candidate_pair_count", 0),
+                  "similar_pair_count": report.get("similar_pair_count", 0),
+                  "skipped": {**report["skipped"], **update["failures"]}}
+        if cache_key is not None:
+            self._groups_cache_key, self._groups_cache_result = cache_key, result
+        return result
 
     def compare(self, body):
         update = self.sync_index()

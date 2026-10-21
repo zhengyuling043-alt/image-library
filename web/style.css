@@ -17,3 +17,4 @@
 .text-search-box input{width:100%;box-sizing:border-box}
 .text-search-box small,.match-explanation{color:var(--muted);line-height:1.45}
 .match-explanation{font-size:.78rem;margin:.55rem 0 0;padding-top:.5rem;border-top:1px dashed var(--line)}
+.match-interpretation{font-size:.75rem;margin:.4rem 0 0;padding:.45rem .55rem;background:var(--note-bg,#f6f1e7);border-radius:8px;border-left:3px solid var(--accent,#b8a08a);color:var(--muted);line-height:1.45}
