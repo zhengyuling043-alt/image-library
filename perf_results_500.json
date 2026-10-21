@@ -1,0 +1,11 @@
+{
+  "scale": 500,
+  "mem_before_mb": 0.0,
+  "full_build_sec": 69.33,
+  "mem_after_index_mb": 0.0,
+  "incremental_add_50_sec": 7.67,
+  "search_sec": 2.581,
+  "grouping_sec": 2.52,
+  "mem_peak_mb": 0.0,
+  "index_file_mb": 1.32
+}

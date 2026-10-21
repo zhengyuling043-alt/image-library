@@ -1,3 +1,13 @@
+"""算法评测工具测试（2 条）。
+
+测什么：evaluate_duplicates.py 的指标统计与数据划分——
+  test_metrics_count_false_positives_and_misses   查准率/召回率/F1 的四格计数
+                                                  （tp/fp/fn/tn）算得对，空数据不误报；
+  test_generation_split_integrity_and_no_overwrite 生成评测集时调参/测试分区完整、
+                                                  不重叠，且拒绝覆盖已有标注文件。
+
+运行方式：python -m unittest test_evaluate_duplicates -v
+"""
 import tempfile
 import unittest
 from pathlib import Path

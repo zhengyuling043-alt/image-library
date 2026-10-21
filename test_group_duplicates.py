@@ -1,3 +1,15 @@
+"""重复分组算法测试（3 条）。
+
+测什么：group_duplicates.py 的聚类正确性——
+  test_chain_does_not_merge                       传递性阻断：甲≈乙、乙≈丙但甲≉丙时，
+                                                  不得强行并成一组（核心难点，组内两两校验策略的验证）；
+  test_semantic_similarity_alone_is_not_duplicate 双通道判定：只有 CLIP 语义相似、dHash
+                                                  差异大 → 判 similar 不算重复；内容哈希相同 → exact；
+  test_real_images_report_and_stale_index         真实图片跑完整分组流程，校验报告结构
+                                                  与过期索引检测。
+
+运行方式：python -m unittest test_group_duplicates -v
+"""
 import shutil
 import tempfile
 import unittest

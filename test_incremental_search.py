@@ -1,3 +1,14 @@
+"""增量索引模块测试（2 条）。
+
+测什么：incremental_search.py 的索引生命周期与容错——
+  test_update_lifecycle            增/删/改图片后，索引按"新增/复用/删除/失败"
+                                   分类正确更新，失败图片不阻塞其余；
+  test_failed_save_preserves_previous_index
+                                   索引保存中途失败时，旧的索引文件保持完好
+                                   （对应 npz 原子替换设计，防断电损坏）。
+
+运行方式：python -m unittest test_incremental_search -v
+"""
 import tempfile
 import unittest
 from pathlib import Path
