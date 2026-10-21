@@ -17,6 +17,9 @@
 | `runtime_compat.py` | Python/Pillow运行时兼容处理 |
 | `evaluate_library.py` | 500张真实素材的校准集/测试集隔离评测和聚类级指标 |
 | `benchmark_backend.py` | 500/2000/5000规模向量检索耗时和内存基准 |
+| `benchmark_pipeline.py` | 500/2000/5000张图片的导入、复扫、增删和持久FAISS检索管线基准 |
+| `benchmark_model_batch.py` | 真实OpenCLIP逐张/批量编码吞吐、加载时间和内存基准 |
+| `final_holdout_validation.py` | 算法冻结后的168张最终留出集验证，输出图片对与聚类级指标 |
 | `test_backend_services.py` | FAISS、SQLite和后端服务测试 |
 | `test_backend_core.py` | 模型编码、签名、软删除与恢复服务测试 |
 | `test_evaluate_library.py` | 独立评测流程、数据完整性和指标测试 |
@@ -26,7 +29,13 @@
 | `BACKEND_DEPLOYMENT.md` | 模型、依赖和启动部署说明 |
 | `BENCHMARK_RESULTS.md/json` | 可复核性能结果和原始数据 |
 | `LIBRARY_EVALUATION_RESULTS.md/json` | 可复核准确率、召回率、F1和错误分析 |
+| `FINAL_HOLDOUT_RESULTS.md/json` | 最终未调参留出集的精确率、召回率、F1、纯度和分类错误分析 |
+| `PIPELINE_BENCHMARK_RESULTS.md/json` | 500/2000/5000张图片的完整管线性能原始结果 |
+| `MODEL_BATCH_BENCHMARK_RESULTS.md/json` | 真实OpenCLIP批量编码性能原始结果 |
 | `B_CODE_EVIDENCE.md` | 个人声明到代码、接口、测试和结果的逐项证据映射 |
+| `B_REPORT_MATERIAL.md` | 可直接用于课程报告的B后端设计、实现、指标和局限说明 |
+| `DEMO_GUIDE.md` | 现场端到端演示顺序、验收点和故障排查 |
+| `AI_USAGE_DISCLOSURE.md` | AI辅助边界、人工核验过程和提交责任说明 |
 
 ## 二、个人负责的后端主流程文件
 
@@ -37,7 +46,7 @@
 |---|---|
 | `indexed_search.py` | OpenCLIP部署、D盘离线权重、CPU/GPU选择、新版PyTorch兼容、FAISS检索 |
 | `incremental_search.py` | 增量入库、检查点恢复、任务状态、FAISS与SQLite同步 |
-| `group_duplicates.py` | SHA-256+dHash+CLIP判定、FAISS范围召回、medoid、质量评分和解释证据 |
+| `group_duplicates.py` | SHA-256+dHash+pHash+RGB色度+CLIP五信号判定、FAISS范围召回、medoid、质量评分和解释证据 |
 | `evaluate_duplicates.py` | 阈值实验、校准/测试隔离和聚类级评测接入 |
 | `web_app.py` | 本地HTTP API、健康诊断、目录迁移、分页、审计导出和召回证据 |
 | `test_incremental_search.py` | 中断恢复、SQLite和FAISS同步测试 |
@@ -56,10 +65,11 @@
 ## 四、可量化验收结果
 
 - OpenCLIP：`ViT-B-32-quickgelu` / `openai`，输出512维归一化向量。
-- 自动化测试：47项通过，其中新增模型服务与回收事务测试4项。
-- 真实素材独立测试：全连接聚类 Precision 98.55%、Recall 92.39%、F1 0.9537。
-- 真实500张分组：FAISS范围搜索召回2886个候选对，避免构造N×N布尔邻接矩阵。
-- 性能测试：已保存500、2000、5000向量规模的检索耗时和内存结果。
+- 自动化测试：54项全部通过，覆盖批量编码、稳定ID、增删同步、中断恢复、聚类、接口与安全清理。
+- 最终留出评测：168张全新生成变体，图片对 Precision 99.77%、Recall 87.30%、F1 0.9312；聚类纯度99.40%。
+- 500张回归集：五信号判定的图片对与聚类指标均为 Precision 100%、Recall 100%、F1 1.0000。
+- 完整管线基准：500/2000/5000张初次入库分别为2.908/13.052/34.704秒；检索P95分别为11.7075/17.7604/12.9494毫秒。
+- 真实OpenCLIP批量编码：8张CPU图片吞吐14.105张/秒，相比逐张编码提升1.159倍。
 
 ## 五、答辩时的准确表述
 
