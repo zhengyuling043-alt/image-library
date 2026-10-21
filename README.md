@@ -8,6 +8,7 @@
 - 素材库图片搜索
 - 向量索引保存与读取
 - 本地网页版：浏览、导入、以图搜图、重复组查看与清单导出
+- 57 项自动化测试全绿；四路信号消融实验与人工真值交叉验证（C 测试与文档分工）
 
 当前模型：ViT-B-32-quickgelu
 预训练权重：openai
@@ -182,6 +183,16 @@ python evaluate_library.py
 python -m unittest test_evaluate_library test_evaluate_duplicates test_group_duplicates test_incremental_search -v
 ```
 
+消融实验与真值交叉验证（C 交付：量化四路信号的贡献，并核验程序化真值符合人工直觉）：
+
+```bat
+python ablation_study.py
+python cross_validate_labels.py --make-template
+python cross_validate_labels.py data/evaluation/annotation_template.csv
+```
+
+结果见 `ABLATION_RESULTS.md`；标注模板行序已乱序固定，可人工补标剩余行后重跑验证。
+
 ## 本地网页版
 
 ```bat
@@ -202,13 +213,15 @@ python web_app.py
 
 课程要求的 15 条软件测试用例覆盖网页版的输入校验、安全防护与端到端流程，用例说明见 [TEST_CASES.md](TEST_CASES.md)。
 
+全套 57 项自动化用例一键全跑（含空库/单图/全重复分组边界，约 10 秒，不下载模型、不碰真实素材）：
+
 ```bat
-python -m unittest test_web_app -v
+python -m unittest discover -v
 ```
 
-## 检查与验证（2026-10-02）
+## 检查与验证（2026-10-21）
 
-运行 `python -m unittest discover -v`：47项通过，包括网页/API 27项、模型与回收服务4项、FAISS/SQLite服务3项，以及增量索引、分组、评测和数据生成13项。测试使用临时图片与替代编码器；另用真实OpenCLIP完成512维归一化向量冒烟验证。
+运行 `python -m unittest discover -v`：57 项全绿——网页/API 28 项、重复分组 8 项（含空库/单图/全重复边界）、增量索引 4 项、后端服务 11 项、评测与数据生成 6 项。测试全程使用临时图片与 FakeEncoder 替身，不下载模型；真实模型精度由 500 张库回归 + 留出集验收 + 消融实验三套真实数据实验独立背书，程序真值经人工肉眼交叉验证 100% 一致。
 
 素材和分组分批显示；搜索命中总数与展示前 20 张分别统计。清理允许选择保留版本，使用签名分组快照，素材变化后拒绝执行。图片移入 `data/index/trash`，可在素材库恢复最近批次；回收区仍占用磁盘。两套阈值对比仅供查看。
 

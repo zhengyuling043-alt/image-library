@@ -1,4 +1,4 @@
-"""重复分组算法测试（3 条）。
+"""重复分组算法测试（9 条）。
 
 测什么：group_duplicates.py 的聚类正确性——
   test_chain_does_not_merge                       传递性阻断：甲≈乙、乙≈丙但甲≉丙时，
@@ -6,7 +6,13 @@
   test_semantic_similarity_alone_is_not_duplicate 双通道判定：只有 CLIP 语义相似、dHash
                                                   差异大 → 判 similar 不算重复；内容哈希相同 → exact；
   test_real_images_report_and_stale_index         真实图片跑完整分组流程，校验报告结构
-                                                  与过期索引检测。
+                                                  与过期索引检测；
+  test_empty_library_groups_into_no_groups        空库边界：无图片、无记录时报告结构与
+                                                  候选计数保持稳定，不抛异常；
+  test_single_image_stays_singleton               单图边界：唯一图片应落在 singletons，
+                                                  不得生成空组；
+  test_all_identical_images_merge_into_one_group  全重复边界：多张字节级相同的图片应
+                                                  正确归并为单个 exact 组。
 
 运行方式：python -m unittest test_group_duplicates -v
 """
@@ -94,6 +100,63 @@ class GroupingTests(unittest.TestCase):
             (library / "small.png").write_bytes(b"changed")
             with self.assertRaises(RuntimeError):
                 generate_groups(library, index)
+
+    def test_empty_library_groups_into_no_groups(self):
+        """空库边界：索引与素材均为空时，报告结构稳定且候选计数为 0。"""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            library = root / "library"
+            library.mkdir()
+            index = root / "index" / "incremental.npz"
+            save_index(index, {}, {})
+            report = generate_groups(library, index, write_report=False)
+            self.assertEqual(report["groups"], [])
+            self.assertEqual(report["singletons"], [])
+            self.assertEqual(report["skipped"], {})
+            self.assertEqual(report["candidate_pair_count"], 0)
+
+    def test_single_image_stays_singleton(self):
+        """单图边界：唯一图片应落入 singletons，不产生任何重复组。"""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            library = root / "library"
+            library.mkdir()
+            pixels = np.tile(np.arange(64, dtype=np.uint8) * 4, (64, 1))
+            Image.fromarray(pixels).save(library / "only.png")
+            records = {p.name: {"sha256": fingerprint(p)} for p in sorted(library.iterdir())}
+            vector = np.zeros(512, dtype=np.float32)
+            vector[0] = 1
+            index = root / "index" / "incremental.npz"
+            save_index(index, records, {n: vector for n in records})
+            report = generate_groups(library, index, write_report=False)
+            self.assertEqual(report["groups"], [])
+            self.assertEqual(report["singletons"], ["only.png"])
+            self.assertEqual(report["candidate_pair_count"], 0)
+
+    def test_all_identical_images_merge_into_one_group(self):
+        """全重复边界：多张字节级相同的图片应归并为单个 exact 组。"""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            library = root / "library"
+            library.mkdir()
+            pixels = np.tile(np.arange(64, dtype=np.uint8) * 4, (64, 1))
+            image = Image.fromarray(pixels)
+            image.save(library / "a.png")
+            shutil.copyfile(library / "a.png", library / "b.png")
+            shutil.copyfile(library / "a.png", library / "c.png")
+            records = {p.name: {"sha256": fingerprint(p)} for p in sorted(library.iterdir())}
+            vector = np.zeros(512, dtype=np.float32)
+            vector[0] = 1
+            index = root / "index" / "incremental.npz"
+            save_index(index, records, {n: vector for n in records})
+            report = generate_groups(library, index, write_report=False)
+            self.assertEqual(len(report["groups"]), 1)
+            group = report["groups"][0]
+            self.assertEqual(group["category"], "exact")
+            self.assertEqual(set(group["members"]), {"a.png", "b.png", "c.png"})
+            self.assertEqual(group["pair_count"], 3)
+            self.assertTrue(all(p["category"] == "exact" for p in group["pairs"]))
+            self.assertIn(group["suggested_keep"], group["members"])
 
 
 if __name__ == "__main__":
