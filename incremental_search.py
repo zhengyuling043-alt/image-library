@@ -438,7 +438,8 @@ def update_index(library=LIBRARY, index_file=INDEX_FILE, encoder=None, rebuild=F
                 counts["reused"] += 1
             else:
                 # 哈希不匹配：文件是新增或已修改，需要重新编码
-                print(f"计算图片向量：{name}")
+                if not hasattr(encoder, "encode_many"):
+                    print(f"计算图片向量：{name}")
                 
                 # 调用编码器将图片转换为 512 维向量
                 if hasattr(encoder, "encode_many"):

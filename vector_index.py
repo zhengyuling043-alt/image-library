@@ -10,6 +10,7 @@ import numpy as np
 
 
 MANIFEST_VERSION = 2
+_INDEX_CACHE = {}
 
 
 def _faiss():
@@ -121,6 +122,23 @@ def _load_faiss(path, faiss):
         return None
 
 
+def _load_cached_faiss(path, faiss):
+    """Reuse an immutable loaded index until the sidecar file changes."""
+
+    try:
+        stat = path.stat()
+        key = (stat.st_mtime_ns, stat.st_size)
+    except OSError:
+        return None
+    cached = _INDEX_CACHE.get(str(path.resolve()))
+    if cached and cached[0] == key:
+        return cached[1]
+    index = _load_faiss(path, faiss)
+    if index is not None:
+        _INDEX_CACHE[str(path.resolve())] = (key, index)
+    return index
+
+
 def _write_atomic(path, data):
     path.parent.mkdir(parents=True, exist_ok=True)
     handle, name = tempfile.mkstemp(dir=str(path.parent), suffix=path.suffix)
@@ -172,6 +190,7 @@ def persist_vector_index(index_file, records, vectors):
     _write_atomic(manifest_path, json.dumps({
         "version": MANIFEST_VERSION, "dimension": dimension, "items": desired,
     }, ensure_ascii=False, sort_keys=True, indent=2).encode("utf-8"))
+    _INDEX_CACHE.pop(str(faiss_path.resolve()), None)
     return "faiss-persistent-idmap2"
 
 
@@ -187,11 +206,11 @@ def rank_persistent(index_file, records, vectors, query, limit=None):
     manifest = _read_manifest(manifest_path)
     expected = {name: records[name].get("sha256") for name in names}
     current = ({name: item.get("sha256") for name, item in manifest["items"].items()} if manifest else {})
-    index = _load_faiss(faiss_path, faiss) if manifest and current == expected else None
+    index = _load_cached_faiss(faiss_path, faiss) if manifest and current == expected else None
     if index is None or int(index.ntotal) != len(names):
         persist_vector_index(index_file, records, vectors)
         manifest = _read_manifest(manifest_path)
-        index = _load_faiss(faiss_path, faiss)
+        index = _load_cached_faiss(faiss_path, faiss)
     if index is None or manifest is None:
         return rank_vectors(records, vectors, query, limit)
     count = len(names) if limit is None else max(1, min(int(limit), len(names)))
