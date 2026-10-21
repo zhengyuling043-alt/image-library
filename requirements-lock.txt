@@ -1,0 +1,8 @@
+# Exact versions used for the verified Windows/Python 3.12 backend run.
+numpy==2.5.4
+Pillow==12.3.0
+torch==2.14.1
+torchvision==0.29.1
+open_clip_torch==3.3.0
+faiss-cpu==1.15.1
+psutil==7.2.2

@@ -65,6 +65,11 @@ class FakeEncoder:
         vector[0] = 1.0
         return vector
 
+    def encode_text(self, text):
+        vector = np.zeros(512, dtype=np.float32)
+        vector[0] = 1.0
+        return vector
+
 
 class WebAppTestCase(unittest.TestCase):
     def test_new_unnumbered_upload_searches_without_manual_update(self):
@@ -74,6 +79,16 @@ class WebAppTestCase(unittest.TestCase):
         self.assertEqual(result["results"][0]["name"], "假日海边.png")
         self.assertAlmostEqual(result["results"][0]["score"], 1.0, places=5)
         self.assertEqual(self.app.snapshot()["ready"], 1)
+
+    def test_image_and_text_results_include_explanations(self):
+        data = png_bytes()
+        self.app.upload({"name": "reference.png", "data": b64(data)})
+        image_result = self.app.query(data)["results"][0]
+        self.assertEqual(image_result["category"], "重复")
+        self.assertIn("SHA-256", image_result["reason"])
+        text_result = self.app.query_text("a reference image")["results"][0]
+        self.assertEqual(text_result["name"], "reference.png")
+        self.assertIn("OpenCLIP", text_result["reason"])
 
     def test_groups_and_compare_skip_bad_image_and_sync_new_copies(self):
         data = png_bytes()
@@ -94,6 +109,8 @@ class WebAppTestCase(unittest.TestCase):
             reports = [job["result"]] if endpoint.endswith("groups") else job["result"].values()
             for report in reports:
                 self.assertEqual(report["total"], 2)
+                self.assertIn(report["candidate_backend"], {"faiss-range-search", "numpy-block-scan"})
+                self.assertGreaterEqual(report["candidate_pair_count"], 1)
                 self.assertEqual(set(report["groups"][0]["members"]), {"原图.png", "副本.png"})
                 self.assertIn("broken.jpg", report["skipped"])
 
@@ -209,9 +226,9 @@ class WebAppTestCase(unittest.TestCase):
         for name in ["ok.jpg", "=evil.jpg"]:
             (self.library / name).write_bytes(png_bytes())
         rows = self.app.export(["=evil.jpg", "ok.jpg", "=evil.jpg"]).decode("utf-8-sig").splitlines()
-        self.assertEqual(rows[0], "文件名,宽度,高度,文件字节数,入库状态")
-        self.assertEqual(rows[1].split(",")[0], "'=evil.jpg")
-        self.assertEqual(rows[2].split(",")[0], "ok.jpg")
+        self.assertIn("稳定ID,文件名,宽度,高度,格式,文件字节数,SHA-256", rows[0])
+        self.assertEqual(rows[1].split(",")[1], "'=evil.jpg")
+        self.assertEqual(rows[2].split(",")[1], "ok.jpg")
         self.assertEqual(len(rows), 3)
         with self.assertRaises(ValueError):
             self.app.export([])
@@ -238,12 +255,18 @@ class WebAppTestCase(unittest.TestCase):
         req = urllib.request.Request(base_url + path, data=data, headers=headers, method=method)
         if host:
             req.add_header("Host", host)
-        try:
-            with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(req, timeout=10) as response:
-                return response.status, response.read()
-        except urllib.error.HTTPError as error:
-            with error:
-                return error.code, error.read()
+        for attempt in range(2):
+            try:
+                with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(req, timeout=10) as response:
+                    return response.status, response.read()
+            except urllib.error.HTTPError as error:
+                with error:
+                    return error.code, error.read()
+            except ConnectionAbortedError:
+                if attempt:
+                    raise
+                # Windows偶尔会重置刚关闭的本地测试短连接；仅重试一次。
+                time.sleep(0.02)
 
     def wait_job(self, base_url, token, job_id, timeout=10):
         deadline = time.time() + timeout
@@ -301,6 +324,53 @@ class WebAppTestCase(unittest.TestCase):
         self.assertEqual(self.request(base_url, "/api/missing")[0], 404)
         self.assertEqual(self.request(base_url, "/api/thumbnail?name=../secret.png")[0], 400)
         self.assertEqual(self.request(base_url, "/api/update", body=[1, 2], token=token)[0], 400)
+
+    def test_tc23_health_reports_runtime_model_and_index(self):
+        """TC23 健康检查不加载模型，并公开部署诊断信息。"""
+        base_url = self.serve()
+        status, data = self.request(base_url, "/api/health")
+        health = json.loads(data)
+        self.assertEqual(status, 200)
+        self.assertEqual(health["status"], "ok")
+        self.assertFalse(health["model"]["loaded"])
+        self.assertEqual(health["model"]["dimension"], 512)
+        self.assertEqual(health["index"]["ready"], 0)
+
+    def test_tc24_catalog_pagination_and_json_export(self):
+        for name in ["a.png", "b.png"]:
+            self.app.upload({"name": name, "data": b64(png_bytes())})
+        web_app.update_index(self.library, self.index, self.app.encoder)
+        base_url = self.serve()
+        status, data = self.request(base_url, "/api/catalog?limit=1&offset=1")
+        page = json.loads(data)
+        self.assertEqual(status, 200)
+        self.assertEqual((page["total"], len(page["items"])), (2, 1))
+        status, data = self.request(base_url, "/api/export",
+                                    {"names": ["a.png"], "format": "json"}, self.app.token)
+        exported = json.loads(data)
+        self.assertEqual(status, 200)
+        self.assertEqual(exported["items"][0]["name"], "a.png")
+        self.assertIn("sha256", exported["items"][0])
+
+    def test_tc25_existing_npz_populates_catalog_on_startup(self):
+        """TC25 旧版NPZ迁移：启动即补齐SQLite，无需重新编码。"""
+        with TemporaryDirectory() as folder:
+            root = Path(folder)
+            library = root / "library"
+            index = root / "index" / "incremental.npz"
+            library.mkdir(parents=True)
+            image = library / "legacy.png"
+            image.write_bytes(png_bytes())
+            records = {image.name: {"sha256": fingerprint(image)}}
+            save_index(index, records, {image.name: np.ones(512, np.float32)})
+            migrated = web_app.LibraryApp(library=library, index=index)
+            try:
+                page = migrated.metadata.list()
+                self.assertEqual(page["total"], 1)
+                self.assertEqual(page["items"][0]["status"], "ready")
+                self.assertEqual(page["items"][0]["sha256"], records[image.name]["sha256"])
+            finally:
+                migrated.executor.shutdown(wait=True)
 
     def test_tc16_cleanup_removes_extra_versions(self):
         """TC16 扩展·批量清理：只删组内非推荐项，索引同步更新。"""

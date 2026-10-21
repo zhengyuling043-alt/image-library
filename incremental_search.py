@@ -43,6 +43,7 @@ import hashlib
 import json
 import os
 import tempfile
+import time
 from pathlib import Path
 
 import numpy as np
@@ -130,6 +131,12 @@ class Encoder:
         """
         self.model = None
         self.preprocess = None  # 图片预处理函数，与模型配套
+        self.tokenizer = None
+
+    def _ensure_loaded(self):
+        from indexed_search import load_model
+        if self.model is None:
+            self.model, self.preprocess = load_model()
 
     def __call__(self, path):
         """
@@ -155,14 +162,28 @@ class Encoder:
             - 模型加载后缓存在 self.model，后续调用直接使用
         """
         # 延迟导入：避免模块加载时就触发模型下载平台访问
-        from indexed_search import load_model, encode_image
-        
-        # 懒加载检查：首次调用时才加载模型
-        if self.model is None:
-            self.model, self.preprocess = load_model()
+        from indexed_search import encode_image
+        self._ensure_loaded()
         
         # 使用加载的模型编码图片，返回特征向量
         return encode_image(path, self.model, self.preprocess)
+
+    def encode_many(self, paths, batch_size=None):
+        """Use true tensor batching for bulk import and isolate bad images."""
+
+        from backend_core.model_service import encode_image_paths
+        self._ensure_loaded()
+        return encode_image_paths(paths, self.model, self.preprocess, batch_size)
+
+    def encode_text(self, text):
+        """Encode an English text query in the image embedding space."""
+
+        import open_clip
+        from backend_core.model_service import encode_texts
+        self._ensure_loaded()
+        if self.tokenizer is None:
+            self.tokenizer = open_clip.get_tokenizer(MODEL)
+        return encode_texts([text], self.model, self.tokenizer)[0]
 
 
 def read_index(path):
@@ -295,13 +316,17 @@ def save_index(path, records, vectors):
         
         # 原子替换：在 Windows 上也是原子操作，旧文件在替换前始终可用
         os.replace(temporary, path)
+        # FAISS 作为可重建的检索加速侧车；NPZ 仍是兼容与恢复所需的权威数据。
+        from vector_index import persist_vector_index
+        persist_vector_index(path, records, vectors)
     finally:
         # 确保临时文件被清理，missing_ok=True 忽略文件不存在的错误
         if temporary is not None:
             temporary.unlink(missing_ok=True)
 
 
-def update_index(library=LIBRARY, index_file=INDEX_FILE, encoder=None, rebuild=False):
+def update_index(library=LIBRARY, index_file=INDEX_FILE, encoder=None, rebuild=False,
+                 checkpoint_every=25, progress=None):
     """
     增量更新图片索引，只重新编码发生变化的图片。
     
@@ -356,6 +381,8 @@ def update_index(library=LIBRARY, index_file=INDEX_FILE, encoder=None, rebuild=F
         raise RuntimeError(f"素材文件夹不存在：{library}，请检查路径。")
     
     # 读取旧索引：rebuild=True 时清空旧数据，否则从文件加载
+    checkpoint_file = index_file.with_suffix(".checkpoint.json")
+    resumed = checkpoint_file.is_file() and not rebuild
     old_records, old_vectors = ({}, {}) if rebuild else read_index(index_file)
     
     # 扫描图片库：获取所有支持的图片文件，按文件名排序确保顺序稳定
@@ -373,13 +400,35 @@ def update_index(library=LIBRARY, index_file=INDEX_FILE, encoder=None, rebuild=F
     
     # 创建或复用编码器：允许外部传入自定义编码器（主要用于测试）
     encoder = encoder or Encoder()
+
+    # 正式 OpenCLIP 编码器提供 encode_many：先完成轻量指纹扫描，再把所有
+    # 新增/修改图片交给有界批处理。普通可调用对象仍走逐张路径，保持测试与
+    # 第三方编码器兼容。
+    precomputed_digests, batch_vectors, batch_failures = {}, {}, {}
+    if hasattr(encoder, "encode_many"):
+        changed_paths = []
+        for candidate in files:
+            try:
+                digest = fingerprint(candidate)
+                precomputed_digests[candidate] = digest
+                if old_records.get(candidate.name, {}).get("sha256") != digest:
+                    changed_paths.append(candidate)
+            except OSError as error:
+                batch_failures[candidate] = str(error)
+        if changed_paths:
+            print(f"批量计算 {len(changed_paths)} 张图片向量")
+            batch_vectors, encoding_failures = encoder.encode_many(changed_paths)
+            batch_failures.update(encoding_failures)
     
     # 遍历所有图片文件，执行增量更新
+    processed, since_checkpoint = 0, 0
     for path in files:
         name = path.name
         try:
             # 第一步：计算当前文件的 SHA256 哈希
-            digest = fingerprint(path)
+            if path in batch_failures and path not in precomputed_digests:
+                raise OSError(batch_failures[path])
+            digest = precomputed_digests.get(path) or fingerprint(path)
             
             # 第二步：检查是否与旧索引中的哈希匹配
             # old_records.get(name, {}).get("sha256") 安全地获取旧哈希值
@@ -389,10 +438,18 @@ def update_index(library=LIBRARY, index_file=INDEX_FILE, encoder=None, rebuild=F
                 counts["reused"] += 1
             else:
                 # 哈希不匹配：文件是新增或已修改，需要重新编码
-                print(f"计算图片向量：{name}")
+                if not hasattr(encoder, "encode_many"):
+                    print(f"计算图片向量：{name}")
                 
                 # 调用编码器将图片转换为 512 维向量
-                vector = np.asarray(encoder(path), dtype=np.float32)
+                if hasattr(encoder, "encode_many"):
+                    if path in batch_failures:
+                        raise ValueError(batch_failures[path])
+                    if path not in batch_vectors:
+                        raise ValueError("批量编码未返回图片向量")
+                    vector = np.asarray(batch_vectors[path], dtype=np.float32)
+                else:
+                    vector = np.asarray(encoder(path), dtype=np.float32)
                 
                 # 验证向量有效性：必须是 512 维且所有值有限
                 if vector.shape != (512,) or not np.isfinite(vector).all():
@@ -405,27 +462,44 @@ def update_index(library=LIBRARY, index_file=INDEX_FILE, encoder=None, rebuild=F
                 
                 # 更新统计：根据文件名是否在旧索引中，区分"新增"和"修改"
                 counts["modified" if name in old_records else "added"] += 1
+                since_checkpoint += 1
             
             # 第三步：保存成功处理的文件信息
             records[name] = {"sha256": digest, "status": "ready"}
             vectors[name] = vector
             
-        except (OSError, ValueError) as error:
+        except (OSError, ValueError, RuntimeError) as error:
             # 处理失败：记录错误信息，继续处理下一个文件
             counts["failed"] += 1
             failures[name] = str(error)
             print(f"入库失败：{name}：{error}")
             # 失败的文件不会加入新索引，下次 update 时会自动重试
+        processed += 1
+        if progress is not None:
+            progress(processed, len(files), name, "failed" if name in failures else "ready")
+        if checkpoint_every and since_checkpoint >= checkpoint_every:
+            save_index(index_file, records, vectors)
+            checkpoint_file.write_text(json.dumps({
+                "processed": processed, "total": len(files), "last": name,
+                "ready": len(records), "updated_at": time.time(),
+            }, ensure_ascii=False, indent=2), encoding="utf-8")
+            since_checkpoint = 0
     
     # 第四步：原子保存新索引
     save_index(index_file, records, vectors)
     
     # 第五步：生成并保存报告文件
-    report = {"counts": counts, "ready": len(records), "failures": failures}
+    report = {"counts": counts, "ready": len(records), "failures": failures,
+              "resumed": resumed, "checkpoint_every": checkpoint_every}
+    from metadata_store import MetadataStore
+    metadata = MetadataStore(index_file.with_suffix(".sqlite3"))
+    metadata.sync(library, records, failures)
+    report["metadata"] = metadata.stats()
     index_file.with_suffix(".report.json").write_text(
         json.dumps(report, ensure_ascii=False, indent=2), 
         encoding="utf-8"
     )
+    checkpoint_file.unlink(missing_ok=True)
     
     # 第六步：输出统计信息到控制台
     print(f"\n新增 {counts['added']}，修改 {counts['modified']}，复用 {counts['reused']}，删除 {counts['deleted']}，失败 {counts['failed']}")
@@ -501,8 +575,7 @@ def search(query, library=LIBRARY, index_file=INDEX_FILE):
     # 编码查询图片：创建临时 Encoder 实例并调用
     query_vector = Encoder()(query)
     
-    # 存储搜索结果：(相似度分数, 文件名) 元组列表
-    results = []
+    valid_records, valid_vectors = {}, {}
     # 过期文件计数器：哈希不匹配或文件不存在的记录
     stale = 0
     
@@ -518,9 +591,7 @@ def search(query, library=LIBRARY, index_file=INDEX_FILE):
             stale += 1
             continue
         
-        # 计算余弦相似度（对于归一化向量，点积等价于余弦相似度）
-        # @ 运算符执行向量点积：query_vector · vectors[name]
-        results.append((float(vectors[name] @ query_vector), name))
+        valid_records[name], valid_vectors[name] = record, vectors[name]
     
     # 如果有过期文件，提示用户更新索引
     if stale:
@@ -529,9 +600,12 @@ def search(query, library=LIBRARY, index_file=INDEX_FILE):
     # 打印搜索结果
     print(f"\n查询图片：{query.name}；最相似的前 5 张：")
     
-    # 排序规则：先按相似度降序（-x[0]），再按文件名升序（x[1]）
-    # 取前5名，从1开始编号
-    for rank, (score, name) in enumerate(sorted(results, key=lambda x: (-x[0], x[1]))[:5], 1):
+    from vector_index import rank_persistent
+    results, search_backend = rank_persistent(
+        index_file, valid_records, valid_vectors, query_vector, limit=5
+    )
+    print(f"检索后端：{search_backend}")
+    for rank, (name, score) in enumerate(results, 1):
         print(f"{rank}. 相似度 {score:.4f} | {name}")
 
 

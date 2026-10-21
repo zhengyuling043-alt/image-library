@@ -1,0 +1,111 @@
+{
+  "scope": "真实扫描/哈希/NPZ/SQLite/持久FAISS/检索管线；编码器为确定性替身，OpenCLIP另测。",
+  "runtime": {
+    "python": "3.12.3",
+    "platform": "Windows-11-10.0.22631-SP0"
+  },
+  "results": [
+    {
+      "images": 500,
+      "initial_import_seconds": 2.908,
+      "throughput_images_per_second": 171.9,
+      "no_change_rescan_seconds": 0.524,
+      "incremental_add_delete_ms": 519.15,
+      "search_p50_ms": 4.0561,
+      "search_p95_ms": 11.7075,
+      "rss_delta_mb": 17.67,
+      "backend": "faiss-persistent-idmap2",
+      "counts": {
+        "initial": {
+          "added": 500,
+          "modified": 0,
+          "reused": 0,
+          "deleted": 0,
+          "failed": 0
+        },
+        "reuse": {
+          "added": 0,
+          "modified": 0,
+          "reused": 500,
+          "deleted": 0,
+          "failed": 0
+        },
+        "incremental": {
+          "added": 1,
+          "modified": 0,
+          "reused": 499,
+          "deleted": 1,
+          "failed": 0
+        }
+      }
+    },
+    {
+      "images": 2000,
+      "initial_import_seconds": 13.052,
+      "throughput_images_per_second": 153.2,
+      "no_change_rescan_seconds": 1.979,
+      "incremental_add_delete_ms": 1924.79,
+      "search_p50_ms": 6.2248,
+      "search_p95_ms": 17.7604,
+      "rss_delta_mb": 4.96,
+      "backend": "faiss-persistent-idmap2",
+      "counts": {
+        "initial": {
+          "added": 2000,
+          "modified": 0,
+          "reused": 0,
+          "deleted": 0,
+          "failed": 0
+        },
+        "reuse": {
+          "added": 0,
+          "modified": 0,
+          "reused": 2000,
+          "deleted": 0,
+          "failed": 0
+        },
+        "incremental": {
+          "added": 1,
+          "modified": 0,
+          "reused": 1999,
+          "deleted": 1,
+          "failed": 0
+        }
+      }
+    },
+    {
+      "images": 5000,
+      "initial_import_seconds": 34.704,
+      "throughput_images_per_second": 144.1,
+      "no_change_rescan_seconds": 5.488,
+      "incremental_add_delete_ms": 9024.28,
+      "search_p50_ms": 12.1496,
+      "search_p95_ms": 12.9494,
+      "rss_delta_mb": 5.99,
+      "backend": "faiss-persistent-idmap2",
+      "counts": {
+        "initial": {
+          "added": 5000,
+          "modified": 0,
+          "reused": 0,
+          "deleted": 0,
+          "failed": 0
+        },
+        "reuse": {
+          "added": 0,
+          "modified": 0,
+          "reused": 5000,
+          "deleted": 0,
+          "failed": 0
+        },
+        "incremental": {
+          "added": 1,
+          "modified": 0,
+          "reused": 4999,
+          "deleted": 1,
+          "failed": 0
+        }
+      }
+    }
+  ]
+}

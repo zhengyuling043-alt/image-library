@@ -13,3 +13,7 @@
 .compare-columns .search-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
 
 .library-actions{display:flex;justify-content:center;gap:14px;margin:24px 0}.keeper-label{display:flex;align-items:center;gap:10px;margin:14px 0;font-size:12px;color:#65796b}.keeper-label select{max-width:75%;min-width:0}.search-results,.compare-columns>div{min-width:0}
+.text-search-box{display:grid;gap:.55rem;margin:1rem 0;padding:1rem;border:1px solid var(--line);border-radius:16px;background:rgba(255,255,255,.45)}
+.text-search-box input{width:100%;box-sizing:border-box}
+.text-search-box small,.match-explanation{color:var(--muted);line-height:1.45}
+.match-explanation{font-size:.78rem;margin:.55rem 0 0;padding-top:.5rem;border-top:1px dashed var(--line)}

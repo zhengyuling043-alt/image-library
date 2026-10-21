@@ -37,13 +37,14 @@ import base64
 import csv
 import io
 import json
-import hashlib
-import hmac
+import platform
 import re
 import secrets
+import sys
 import tempfile
 import threading
 import time
+import traceback
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
@@ -51,11 +52,23 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
+LOCAL_SITE_PACKAGES = Path(__file__).resolve().parent / ".runtime" / "site-packages"
+if LOCAL_SITE_PACKAGES.is_dir():
+    sys.path.insert(0, str(LOCAL_SITE_PACKAGES))
+
 import numpy as np
 from PIL import Image, ImageOps
 
-from group_duplicates import generate_groups
-from incremental_search import ROOT, LIBRARY, INDEX_FILE, EXTENSIONS, Encoder, fingerprint, read_index, save_index, update_index
+from group_duplicates import generate_groups, inspect_image
+from incremental_search import (
+    ROOT, LIBRARY, INDEX_FILE, EXTENSIONS, MODEL, WEIGHTS, Encoder,
+    fingerprint, read_index, save_index, update_index,
+)
+from runtime_compat import LANCZOS
+from metadata_store import MetadataStore
+from vector_index import backend_name, rank_persistent
+from backend_core.recycle_service import RecycleBinService
+from backend_core.retrieval_policy import PRESETS, explain_image_result, explain_text_result
 
 # Web 静态资源目录，存放前端 HTML、JS、CSS 等文件
 WEB = ROOT / "web"
@@ -160,7 +173,7 @@ def thumbnail(path, modified, size):
         # exif_transpose 根据 EXIF Orientation 标签自动旋转，保证方向正确
         image = ImageOps.exif_transpose(image).convert("RGB")
         # thumbnail 保持宽高比缩放，LANCZOS 提供高质量重采样
-        image.thumbnail((640, 480), Image.Resampling.LANCZOS)
+        image.thumbnail((640, 480), LANCZOS)
         buffer = io.BytesIO()
         image.save(buffer, "JPEG", quality=82)
         return buffer.getvalue()
@@ -229,6 +242,56 @@ class LibraryApp:
         self.working = False
         # 图片元数据缓存，键为文件名，值为 (key, width, height, digest)
         self.metadata_cache = {}
+        self.metadata = MetadataStore(self.index.with_suffix(".sqlite3"))
+        self.recycle = RecycleBinService(
+            self.library,
+            self.index,
+            self.token,
+            read_index=lambda path: read_index(path),
+            save_index=lambda path, records, vectors: save_index(path, records, vectors),
+            metadata=self.metadata,
+        )
+        self.group_metadata = {}
+        # 兼容升级前已存在的 NPZ 索引：首次启动时直接补齐 SQLite 目录，
+        # 不重新加载模型或编码图片。后续更新由 update_index 持续同步。
+        if self.index.is_file() and self.metadata.stats()["active"] == 0:
+            try:
+                records, _ = read_index(self.index)
+                if records:
+                    self.metadata.sync(self.library, records)
+            except (OSError, ValueError, RuntimeError):
+                # 索引损坏信息由 /api/health 统一报告，不能阻止服务启动。
+                pass
+
+    def health(self):
+        """Return deployment, model and index diagnostics without loading weights."""
+
+        index_error = None
+        try:
+            records, vectors = read_index(self.index)
+            dimension = len(next(iter(vectors.values()))) if vectors else 512
+        except (OSError, ValueError, RuntimeError) as error:
+            records, dimension, index_error = {}, None, str(error)
+        model = getattr(self.encoder, "model", None)
+        if model is None:
+            device, loaded = "not-loaded", False
+        else:
+            loaded = True
+            try:
+                device = str(next(model.parameters()).device)
+            except (AttributeError, StopIteration):
+                device = "unknown"
+        return {
+            "status": "degraded" if index_error else "ok",
+            "runtime": {"python": platform.python_version(), "platform": platform.platform()},
+            "model": {"name": MODEL, "weights": WEIGHTS, "device": device,
+                      "loaded": loaded, "dimension": dimension},
+            "index": {"path": str(self.index.resolve()), "exists": self.index.is_file(),
+                      "ready": len(records), "error": index_error,
+                      "search_backend": backend_name()},
+            "library": {"path": str(self.library.resolve()), "exists": self.library.is_dir()},
+            "metadata": self.metadata.stats(),
+        }
 
     def snapshot(self):
         """
@@ -337,7 +400,10 @@ class LibraryApp:
             identifier = uuid.uuid4().hex
             self.working = True
             self.active_job = identifier
-            self.jobs[identifier] = dict(id=identifier, action=action, state="running", started=time.time())
+            self.jobs[identifier] = dict(
+                id=identifier, action=action, state="running", started=time.time(),
+                progress={"current": 0, "total": 0, "percent": 0, "name": None},
+            )
             # 保留最近 20 个任务记录，清理更早的历史
             for key in list(self.jobs)[:-20]:
                 self.jobs.pop(key)
@@ -349,8 +415,12 @@ class LibraryApp:
                 with self.lock:
                     self.jobs[identifier].update(state="done", result=result)
             except Exception as error:
+                traceback.print_exc()
+                message = str(error).strip() or (
+                    f"{type(error).__name__}（异常未提供详细信息，请查看服务日志）"
+                )
                 with self.lock:
-                    self.jobs[identifier].update(state="failed", error=str(error))
+                    self.jobs[identifier].update(state="failed", error=message)
             finally:
                 with self.lock:
                     self.working = False
@@ -358,6 +428,24 @@ class LibraryApp:
         # 提交到线程池异步执行
         self.executor.submit(run)
         return {"job": identifier}
+
+    def update_progress(self, current, total, name, status):
+        """Publish resumable indexing progress to the active background job."""
+
+        with self.lock:
+            identifier = self.active_job
+            if identifier in self.jobs:
+                self.jobs[identifier]["progress"] = {
+                    "current": current, "total": total,
+                    "percent": round(current * 100 / total, 1) if total else 100,
+                    "name": name, "status": status,
+                }
+
+    def update_index_task(self, rebuild=False):
+        return update_index(
+            self.library, self.index, self.encoder, rebuild=rebuild,
+            progress=self.update_progress,
+        )
 
     def upload(self, body):
         """
@@ -416,7 +504,10 @@ class LibraryApp:
         snapshot = self.snapshot()
         names = {item["name"] for item in snapshot["items"]}
         if snapshot["pending"] or names != set(records):
-            return update_index(self.library, self.index, self.encoder)
+            return update_index(self.library, self.index, self.encoder,
+                                progress=self.update_progress)
+        if self.metadata.stats()["active"] != len(records):
+            self.metadata.sync(self.library, records)
         return {"failures": {}, "ready": len(records)}
 
     def query(self, data):
@@ -459,7 +550,9 @@ class LibraryApp:
             query.write_bytes(data)
             # 提取查询图片的特征向量
             vector = self.encoder(query)
-        results, skipped = [], 0
+            query_sha = fingerprint(query)
+            query_info = inspect_image(query)
+        valid_records, valid_vectors, skipped = {}, {}, 0
         # 遍历索引中的每张图片
         for name, record in records.items():
             path = safe_file(self.library, name)
@@ -467,217 +560,64 @@ class LibraryApp:
             if not path.is_file() or fingerprint(path) != record["sha256"]:
                 skipped += 1
                 continue
-            # 计算余弦相似度：向量点积（已归一化）
-            results.append({"name": name, "score": float(np.clip(vectors[name] @ vector, -1, 1))})
-        # 按相似度降序排序，相似度相同时按文件名排序
+            valid_records[name], valid_vectors[name] = record, vectors[name]
+        ranked, search_backend = rank_persistent(
+            self.index, valid_records, valid_vectors, vector
+        )
+        results = []
+        for name, score in ranked:
+            score = float(np.clip(score, -1, 1))
+            explanation = explain_image_result(
+                score, query_sha, query_info, valid_records[name]["sha256"],
+                inspect_image(safe_file(self.library, name)),
+            )
+            results.append({"name": name, "score": score, **explanation})
         results.sort(key=lambda item: (-item["score"], item["name"]))
         # 返回全量得分供前端做阈值过滤与双阈值对比，一次编码多次复用。
         return {"results": results, "searched": len(results), "skipped": skipped,
+                "backend": search_backend,
                 "failures": sync["failures"]}
 
+    def query_text(self, text):
+        """Search images with an OpenCLIP text embedding (English optimized)."""
+
+        text = str(text or "").strip()
+        if not text or len(text) > 200:
+            raise ValueError("请输入 1～200 个字符的检索文本")
+        sync = self.sync_index()
+        records, vectors = read_index(self.index)
+        if not records:
+            raise ValueError("索引为空，请先导入图片并更新索引")
+        vector = self.encoder.encode_text(text)
+        ranked, search_backend = rank_persistent(self.index, records, vectors, vector)
+        results = []
+        for name, score in ranked:
+            score = float(np.clip(score, -1, 1))
+            results.append({"name": name, "score": score,
+                            **explain_text_result(score, text)})
+        return {"results": results, "searched": len(results), "skipped": 0,
+                "backend": search_backend, "query_type": "text",
+                "text": text, "failures": sync["failures"]}
+
     def sign_review(self, review):
-        """
-        对分组审查数据进行 HMAC-SHA256 签名，防止数据篡改。
+        """Sign a duplicate-group review with the personal recycle service."""
 
-        参数:
-            review (dict): 分组审查数据，包含 thresholds 和 hashes 字段
-
-        返回:
-            str: 十六进制签名字符串（64 字符）
-
-        安全机制:
-            - 使用 self.token 作为 HMAC 密钥
-            - JSON 序列化时按键排序，确保签名一致性
-            - 前端提交清理请求时需携带签名，服务端验证
-        """
-        # JSON 序列化，按键排序确保相同数据生成相同签名
-        encoded = json.dumps(review, sort_keys=True, ensure_ascii=False).encode("utf-8")
-        # HMAC-SHA256 签名
-        return hmac.new(self.token.encode(), encoded, hashlib.sha256).hexdigest()
+        return self.recycle.sign_review(review)
 
     def recoverable_batches(self):
-        """
-        获取可恢复的回收批次列表。
+        """List recoverable soft-delete batches."""
 
-        返回:
-            list: 批次列表，每项包含 id（批次 ID）、count（文件数量）、created（创建时间戳）
-
-        回收站结构:
-            trash/
-            ├── <batch_id>/
-            │   ├── receipt.json    # 批次元数据（文件列表、保留文件、创建时间）
-            │   ├── files/          # 被清理的图片文件
-            │   └── vectors.npz     # 对应的索引数据（用于恢复）
-            └── ...
-
-        遍历逻辑:
-            1. 扫描 trash 目录下所有 receipt.json
-            2. 解析批次元数据，统计仍存在的文件数量
-            3. 按创建时间降序排序返回
-        """
-        trash = self.index.parent / "trash"
-        batches = []
-        if trash.exists():
-            # 遍历所有批次的收据文件
-            for path in trash.glob("*/receipt.json"):
-                try:
-                    receipt = json.loads(path.read_text(encoding="utf-8"))
-                    # 统计批次中仍存在的文件（可能部分已被手动恢复）
-                    remaining = [name for name in receipt["files"] if safe_file(path.parent / "files", name).is_file()]
-                    if remaining:
-                        batches.append({"id": path.parent.name, "count": len(remaining), "created": receipt["created"]})
-                except (OSError, ValueError, KeyError):
-                    # 跳过损坏或格式错误的收据文件
-                    continue
-        # 按创建时间降序排序，最新的在前
-        return sorted(batches, key=lambda item: item["created"], reverse=True)
+        return self.recycle.recoverable_batches()
 
     def cleanup(self, body):
-        """
-        清理重复图片，将选中的文件移入回收站。
+        """Soft-delete reviewed duplicates through the transactional service."""
 
-        参数:
-            body (dict): 包含以下字段：
-                - review (dict): 分组审查数据（包含 thresholds 和 hashes）
-                - signature (str): review 的 HMAC 签名
-                - names (list): 要清理的文件名列表
-                - keep (str): 要保留的文件名（不删除）
-
-        返回:
-            dict: 包含以下字段：
-                - deleted (list): 已删除的文件名列表
-                - rejected (list): 被拒绝的文件名列表（始终为空）
-                - batch (str): 回收批次 ID
-                - counts (dict): 删除数量统计
-                - message (str): 操作结果消息
-
-        异常:
-            ValueError: 当签名验证失败、参数无效或文件已变化时抛出
-
-        安全机制:
-            1. HMAC 签名验证，防止使用过期的分组数据
-            2. 文件指纹校验，确保清理前文件未被修改
-            3. 原子性操作：失败时自动回滚已移动的文件
-
-        清理流程:
-            1. 验证签名和参数
-            2. 检查所有文件指纹与索引一致
-            3. 创建回收批次，保存元数据和索引备份
-            4. 移动文件到回收站
-            5. 更新主索引，移除已删除的记录
-        """
-        # 验证签名，防止使用过期或被篡改的分组数据
-        review, signature = body.get("review"), body.get("signature", "")
-        if not isinstance(review, dict) or not isinstance(signature, str) or not hmac.compare_digest(signature, self.sign_review(review)):
-            raise ValueError("分组结果已失效，请重新分析后清理")
-        # 验证待删除文件名列表
-        names = body.get("names")
-        if not isinstance(names, list) or not names or not all(isinstance(n, str) for n in names):
-            raise ValueError("请先选择要清理的重复版本")
-        # 去重，保持顺序
-        names = list(dict.fromkeys(names))
-        members = review["hashes"]
-        keep = body.get("keep")
-        # 验证保留文件和删除文件都在分组内
-        if keep not in members or keep in names or any(name not in members for name in names):
-            raise ValueError("清理范围不属于已查看的重复组，或包含要保留的图片")
-        # 读取当前索引
-        records, vectors = read_index(self.index)
-        # 验证组内所有文件指纹与索引一致，确保文件未被修改
-        for name, digest in members.items():
-            path = safe_file(self.library, name)
-            if not path.is_file() or fingerprint(path) != digest or records.get(name, {}).get("sha256") != digest:
-                raise ValueError("组内图片已变化，请更新索引并重新分析；本次未清理任何图片")
-        # 生成批次 ID 并创建回收目录
-        batch_id = uuid.uuid4().hex
-        batch = self.index.parent / "trash" / batch_id
-        storage = batch / "files"
-        storage.mkdir(parents=True)
-        # 保存批次元数据：创建时间、文件指纹、保留文件
-        receipt = {"created": time.time(), "files": {n: records[n]["sha256"] for n in names}, "keep": keep}
-        (batch / "receipt.json").write_text(json.dumps(receipt, ensure_ascii=False), encoding="utf-8")
-        # 备份被删除文件的索引数据，用于恢复
-        save_index(batch / "vectors.npz", {n: records[n] for n in names}, {n: vectors[n] for n in names})
-        moved = []
-        try:
-            # 逐个移动文件到回收站
-            for name in names:
-                safe_file(self.library, name).replace(safe_file(storage, name))
-                moved.append(name)
-            # 更新主索引，移除已删除的记录
-            save_index(self.index, {n: r for n, r in records.items() if n not in names},
-                       {n: v for n, v in vectors.items() if n not in names})
-        except Exception:
-            # 失败时回滚：将已移动的文件移回素材库
-            for name in reversed(moved):
-                safe_file(storage, name).replace(safe_file(self.library, name))
-            raise
-        return {"deleted": names, "rejected": [], "batch": batch_id,
-                "counts": {"deleted": len(names)}, "message": "已移入本地回收区，可恢复"}
+        return self.recycle.cleanup(body)
 
     def restore(self, body):
-        """
-        从回收站恢复被清理的图片。
+        """Restore one recycle batch without overwriting library files."""
 
-        参数:
-            body (dict): 包含 batch 字段（回收批次 ID）
-
-        返回:
-            dict: 包含 restored 字段（已恢复的文件名列表）
-
-        异常:
-            ValueError: 当批次 ID 无效、批次已恢复、存在同名冲突或文件已变化时抛出
-
-        恢复流程:
-            1. 验证批次 ID 格式（32 位十六进制）
-            2. 读取批次元数据和备份索引
-            3. 检查每个文件：
-               - 素材库中不存在同名文件
-               - 回收站中文件指纹与备份一致
-            4. 移动文件回素材库
-            5. 恢复索引数据
-
-        安全机制:
-            - 原子性操作：失败时自动回滚
-            - 指纹校验：防止恢复损坏的文件
-            - 同名检查：避免覆盖现有文件
-        """
-        # 验证批次 ID 格式
-        identifier = body.get("batch", "")
-        if not isinstance(identifier, str) or not re.fullmatch(r"[0-9a-f]{32}", identifier):
-            raise ValueError("无效回收批次")
-        batch = self.index.parent / "trash" / identifier
-        # 读取批次元数据和备份索引
-        receipt = json.loads((batch / "receipt.json").read_text(encoding="utf-8"))
-        old_records, old_vectors = read_index(batch / "vectors.npz")
-        records, vectors = read_index(self.index)
-        # 获取批次中仍存在的文件
-        names = [n for n in receipt["files"] if safe_file(batch / "files", n).is_file()]
-        if not names:
-            raise ValueError("该批次已恢复")
-        # 恢复前检查：同名冲突和文件完整性
-        for name in names:
-            # 检查素材库中是否已存在同名文件
-            if safe_file(self.library, name).exists() or name in records:
-                raise ValueError(f"素材库已有同名文件 {name}，为避免覆盖，本次未恢复")
-            # 验证回收站中文件指纹与备份一致
-            if fingerprint(safe_file(batch / "files", name)) != receipt["files"][name]:
-                raise ValueError("回收文件已变化，停止恢复")
-        moved = []
-        try:
-            # 逐个移动文件回素材库
-            for name in names:
-                safe_file(batch / "files", name).replace(safe_file(self.library, name))
-                moved.append(name)
-            # 恢复索引数据：合并备份的记录到主索引
-            save_index(self.index, {**records, **{n: old_records[n] for n in names}},
-                       {**vectors, **{n: old_vectors[n] for n in names}})
-        except Exception:
-            # 失败时回滚：将已恢复的文件移回回收站
-            for name in reversed(moved):
-                safe_file(self.library, name).replace(safe_file(batch / "files", name))
-            raise
-        return {"restored": names}
+        return self.recycle.restore(body)
 
     def groups(self, parameters, sync=True):
         """
@@ -704,8 +644,10 @@ class LibraryApp:
             3. 前端使用签名验证后才能执行清理操作
         """
         # 解析参数，提供默认值
-        cosine = float(parameters.get("similarity", .94))
-        distance = int(parameters.get("distance", 6))
+        selected = parameters.get("preset")
+        defaults = PRESETS.get(selected, PRESETS["balanced"])
+        cosine = float(parameters.get("similarity", defaults["cosine"]))
+        distance = int(parameters.get("distance", defaults["dhash_distance"]))
         # 验证参数范围
         if not np.isfinite(cosine) or not 0 <= cosine <= 1 or not 0 <= distance <= 64:
             raise ValueError("相似度应在 0～1，哈希距离应在 0～64")
@@ -718,8 +660,17 @@ class LibraryApp:
                       "hashes": {n: report["images"][n]["sha256"] for n in group["members"]}}
             # 签名用于清理时的安全验证
             group["review"], group["signature"] = review, self.sign_review(review)
+            for name in group["members"]:
+                self.group_metadata[name] = {
+                    "group_id": group["id"], "category": group["category"],
+                    "quality_score": group.get("quality_scores", {}).get(name),
+                    "suggested_keep": name == group["suggested_keep"],
+                }
         return {"groups": report["groups"], "singletons": report["singletons"],
                 "thresholds": report["thresholds"], "total": len(report["images"]),
+                "candidate_backend": report.get("candidate_backend"),
+                "candidate_pair_count": report.get("candidate_pair_count", 0),
+                "similar_pair_count": report.get("similar_pair_count", 0),
                 "skipped": {**report["skipped"], **update["failures"]}}
 
     def compare(self, body):
@@ -762,16 +713,40 @@ class LibraryApp:
         output = io.StringIO(newline="")
         writer = csv.writer(output)
         # 写入表头
-        writer.writerow(["文件名", "宽度", "高度", "文件字节数", "入库状态"])
+        catalogue = self.metadata.by_names(names)
+        writer.writerow(["稳定ID", "文件名", "宽度", "高度", "格式", "文件字节数", "SHA-256",
+                         "入库状态", "重复组", "重复类别", "质量分", "推荐保留", "模型", "权重"])
         # 去重，保持顺序
         for name in dict.fromkeys(names):
             item = snapshot[name]
             # 防止 CSV 注入：文件名以公式字符开头时添加单引号前缀
             # 避免电子表格软件将文件名当作公式执行
             csv_name = "'" + name if name.startswith(("=", "+", "-", "@", "\t", "\r")) else name
-            writer.writerow([csv_name, item["width"], item["height"], item["bytes"], item["status"]])
+            metadata = catalogue.get(name, {})
+            group = self.group_metadata.get(name, {})
+            writer.writerow([metadata.get("id", ""), csv_name, item["width"], item["height"],
+                             metadata.get("format", ""), item["bytes"], metadata.get("sha256", ""),
+                             item["status"], group.get("group_id", ""), group.get("category", ""),
+                             group.get("quality_score", ""), group.get("suggested_keep", ""), MODEL, WEIGHTS])
         # 返回 UTF-8 BOM 编码的字节数据
         return output.getvalue().encode("utf-8-sig")
+
+    def export_json(self, names):
+        """Export the same auditable metadata as structured JSON."""
+
+        if not isinstance(names, list) or not names:
+            raise ValueError("请先选择要导出的图片")
+        snapshot = {item["name"]: item for item in self.snapshot()["items"]}
+        if any(not isinstance(name, str) or name not in snapshot for name in names):
+            raise ValueError("选中的图片已不存在，请刷新素材库")
+        catalogue = self.metadata.by_names(names)
+        rows = []
+        for name in dict.fromkeys(names):
+            rows.append({**snapshot[name], **catalogue.get(name, {}),
+                         **self.group_metadata.get(name, {}),
+                         "model": MODEL, "weights": WEIGHTS})
+        return json.dumps({"exported_at": time.time(), "items": rows},
+                          ensure_ascii=False, indent=2).encode("utf-8")
 
 
 def make_handler(app):
@@ -888,6 +863,16 @@ def make_handler(app):
                 # API：素材库快照
                 if url.path == "/api/library":
                     return self.respond(app.snapshot())
+                if url.path == "/api/health":
+                    return self.respond(app.health())
+                if url.path == "/api/presets":
+                    return self.respond({"default": "balanced", "presets": PRESETS})
+                if url.path == "/api/catalog":
+                    query = parse_qs(url.query)
+                    return self.respond(app.metadata.list(
+                        limit=query.get("limit", [50])[0], offset=query.get("offset", [0])[0],
+                        status=query.get("status", [None])[0], query=query.get("q", [None])[0],
+                    ))
                 # API：任务状态查询
                 if url.path.startswith("/api/jobs/"):
                     with app.lock:
@@ -948,11 +933,15 @@ def make_handler(app):
                     return self.respond(app.upload(body))
                 if self.path == "/api/update":
                     # 更新索引：提交异步任务
-                    return self.respond(app.submit("update", lambda: update_index(app.library, app.index, app.encoder)))
+                    return self.respond(app.submit("update", lambda: app.update_index_task(
+                        rebuild=bool(body.get("rebuild", False)))))
                 if self.path == "/api/search":
                     # 以图搜图：解码图片后提交异步任务
                     data = decode_image(body.get("data"))
                     return self.respond(app.submit("search", lambda: app.query(data)))
+                if self.path == "/api/search-text":
+                    text_query = body.get("text")
+                    return self.respond(app.submit("search-text", lambda: app.query_text(text_query)))
                 if self.path == "/api/groups":
                     # 分析重复分组
                     return self.respond(app.submit("groups", lambda: app.groups(body)))
@@ -965,6 +954,9 @@ def make_handler(app):
                     # 恢复回收站文件
                     return self.respond(app.submit("restore", lambda: app.restore(body)))
                 if self.path == "/api/export":
+                    if body.get("format") == "json":
+                        return self.respond(app.export_json(body.get("names")), "application/json; charset=utf-8",
+                                            extra={"Content-Disposition": 'attachment; filename="image-list.json"'})
                     # 导出 CSV，添加 Content-Disposition 头触发下载
                     return self.respond(app.export(body.get("names")), "text/csv; charset=utf-8", extra={"Content-Disposition": 'attachment; filename="image-list.csv"'})
                 self.respond({"error": "操作不存在"}, status=404)

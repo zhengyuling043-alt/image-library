@@ -36,6 +36,69 @@ import numpy as np
 from PIL import Image, ImageOps
 
 from incremental_search import LIBRARY, INDEX_FILE, EXTENSIONS, fingerprint, read_index
+from runtime_compat import LANCZOS, popcount
+from vector_index import threshold_pairs
+
+
+COLOR_DISTANCE_THRESHOLD = 0.12
+
+
+def _dhash(image):
+    gray = np.asarray(image.convert("L").resize((9, 8), LANCZOS))
+    value = 0
+    for bit in (gray[:, 1:] > gray[:, :-1]).ravel():
+        value = (value << 1) | int(bit)
+    return value
+
+
+def _phash(image):
+    """64-bit perceptual hash from low-frequency DCT coefficients."""
+
+    pixels = np.asarray(image.convert("L").resize((32, 32), LANCZOS), dtype=np.float32)
+    coordinates = np.arange(32, dtype=np.float32)
+    frequencies = np.arange(8, dtype=np.float32)[:, None]
+    basis = np.cos((2 * coordinates + 1) * frequencies * np.pi / 64)
+    coefficients = basis @ pixels @ basis.T
+    median = float(np.median(coefficients.ravel()[1:]))
+    value = 0
+    for bit in (coefficients > median).ravel():
+        value = (value << 1) | int(bit)
+    return value
+
+
+def hash_distance(left, right):
+    """Minimum perceptual distance across full-frame and center-crop views."""
+
+    left_hashes = left.get("dhashes", [left["dhash"]])
+    right_hashes = right.get("dhashes", [right["dhash"]])
+    return min(popcount(a ^ b) for a in left_hashes for b in right_hashes)
+
+
+def phash_distance(left, right):
+    left_hashes = left.get("phashes", [left.get("phash", 0)])
+    right_hashes = right.get("phashes", [right.get("phash", 0)])
+    return min(popcount(a ^ b) for a in left_hashes for b in right_hashes)
+
+
+def color_distance(left, right):
+    """Euclidean distance between brightness-normalized RGB means."""
+
+    if "color_signature" not in left or "color_signature" not in right:
+        return 0.0
+    return float(np.linalg.norm(np.asarray(left["color_signature"], np.float32) -
+                                np.asarray(right["color_signature"], np.float32)))
+
+
+def near_duplicate_decision(score, dhash_value, phash_value, chroma_value,
+                            similarity, max_distance):
+    """Four-signal decision plus a guarded local-overlay recovery rule."""
+
+    primary = (score >= similarity and dhash_value <= max_distance and
+               phash_value <= 12 and chroma_value <= COLOR_DISTANCE_THRESHOLD)
+    local_overlay = (score >= max(0.75, similarity - 0.15) and
+                     dhash_value <= max_distance and phash_value <= 6 and
+                     chroma_value <= 0.08)
+    return primary or local_overlay
 
 
 def inspect_image(path):
@@ -67,16 +130,48 @@ def inspect_image(path):
         image = ImageOps.exif_transpose(source)
         width, height = image.size
         # 转为灰度图（"L"模式）并缩放到 9x8，使用 Lanczos 抗锯齿算法
-        gray = np.asarray(image.convert("L").resize((9, 8), Image.Resampling.LANCZOS))
+        grayscale = image.convert("L")
+        views = [image]
+        # Wider crops cover ordinary framing changes; tighter center views make
+        # the hash resilient to corner watermarks without ignoring global color.
+        for ratio in (0.9, 0.8, 0.7, 0.6):
+            crop_width, crop_height = max(1, int(width * ratio)), max(1, int(height * ratio))
+            left, top = (width - crop_width) // 2, (height - crop_height) // 2
+            views.append(image.crop((left, top, left + crop_width, top + crop_height)))
+        color_preview = image.convert("RGB")
+        color_preview.thumbnail((128, 128), LANCZOS)
+        rgb_mean = np.asarray(color_preview, dtype=np.float32).reshape(-1, 3).mean(axis=0)
+        color_signature = (rgb_mean / max(float(rgb_mean.sum()), 1e-6)).tolist()
+        quality_preview = grayscale.copy()
+        quality_preview.thumbnail((512, 512), LANCZOS)
+        pixels = np.asarray(quality_preview, dtype=np.float32)
     # 64 位差分感知哈希：比较每行相邻像素的亮度变化方向
     # gray[:, 1:] 是第 1~8 列，gray[:, :-1] 是第 0~7 列
     # 逐元素比较后展平为一维布尔数组，True 表示右侧更亮（位=1）
-    bits = (gray[:, 1:] > gray[:, :-1]).ravel()
-    # 将 64 个布尔位拼接成一个 64 位整数
-    value = 0
-    for bit in bits:
-        value = (value << 1) | int(bit)
-    return {"width": width, "height": height, "dhash": value}
+    hashes = [_dhash(view) for view in views]
+    phashes = [_phash(view) for view in views]
+    value = hashes[0]
+    brightness = float(pixels.mean()) if pixels.size else 0.0
+    horizontal = np.diff(pixels, axis=1) if pixels.shape[1] > 1 else np.zeros(1)
+    vertical = np.diff(pixels, axis=0) if pixels.shape[0] > 1 else np.zeros(1)
+    sharpness = float((np.mean(horizontal ** 2) + np.mean(vertical ** 2)) / 2)
+    resolution_score = min(np.log1p(width * height) / np.log1p(20_000_000), 1.0)
+    sharpness_score = min(np.log1p(sharpness) / np.log1p(5_000), 1.0)
+    exposure_score = max(0.0, 1.0 - abs(brightness - 127.5) / 127.5)
+    # 分辨率占主要权重，防止缩小图因插值后边缘更锐而误胜原始大图。
+    quality_score = round(100 * (0.65 * resolution_score +
+                                 0.25 * sharpness_score +
+                                 0.10 * exposure_score), 2)
+    return {"width": width, "height": height, "dhash": value, "dhashes": hashes,
+            "phash": phashes[0], "phashes": phashes,
+            "color_signature": color_signature,
+            "quality_score": quality_score, "sharpness": round(sharpness, 2),
+            "brightness": round(brightness, 2),
+            "quality_components": {
+                "resolution": round(resolution_score, 4),
+                "sharpness": round(sharpness_score, 4),
+                "exposure": round(exposure_score, 4),
+            }}
 
 
 def classify_pair(a, b, info, vectors, similarity, max_distance):
@@ -125,22 +220,27 @@ def classify_pair(a, b, info, vectors, similarity, max_distance):
     # np.clip 防止浮点精度问题导致结果超出 [-1, 1] 理论范围
     score = float(np.clip(vectors[a] @ vectors[b], -1, 1))
     # 计算 dHash 的汉明距离：异或后统计不同位的数量
-    distance = (info[a]["dhash"] ^ info[b]["dhash"]).bit_count()
+    distance = hash_distance(info[a], info[b])
+    perceptual_distance = phash_distance(info[a], info[b])
+    chroma_distance = color_distance(info[a], info[b])
     # 按优先级判定分类
     if info[a]["sha256"] == info[b]["sha256"]:
         # SHA-256 完全一致，文件级重复，最严格的类别
-        category = "exact"
-    elif score >= similarity and distance <= max_distance:
+        category, reason = "exact", "SHA-256一致，文件内容完全相同"
+    elif near_duplicate_decision(score, distance, perceptual_distance, chroma_distance,
+                                 similarity, max_distance):
         # 向量相似度和结构相似度都达标，判定为近重复
-        category = "near"
+        category, reason = "near", "CLIP语义、多视图dHash/pHash结构与RGB色度共同通过"
     elif score >= similarity:
         # 仅向量相似度达标，语义相似但视觉结构差异较大
-        category = "similar"
+        category, reason = "similar", "CLIP语义相似，但结构或色度未通过近重复安全门"
     else:
         # 不满足任何相似条件
-        category = "other"
+        category, reason = "other", "未达到重复或相似阈值"
     return {"a": a, "b": b, "category": category,
-            "cosine": score, "dhash_distance": distance}
+            "cosine": score, "dhash_distance": distance,
+            "phash_distance": perceptual_distance,
+            "color_distance": round(chroma_distance, 6), "reason": reason}
 
 
 def complete_groups(names, matches):
@@ -198,7 +298,7 @@ def generate_groups(library=LIBRARY, index_file=INDEX_FILE, similarity=0.94, max
         1. 验证参数和素材一致性
         2. 提取每张图片的元信息和感知哈希
         3. 按 SHA-256 合并完全重复的文件
-        4. 分块计算 CLIP 向量相似度，构建邻接矩阵
+        4. 使用 FAISS 阈值范围搜索召回候选对（无FAISS时分块回退）
         5. 使用贪心算法将图片分组
         6. 生成 JSON 报告和可选的控制台输出
 
@@ -240,8 +340,8 @@ def generate_groups(library=LIBRARY, index_file=INDEX_FILE, similarity=0.94, max
     注意事项：
         - 不会删除任何图片，仅生成待人工核对的报告
         - 要求素材与索引严格一致，避免对过期向量分组
-        - 内存优化：使用布尔邻接矩阵而非字典存储数百万图片对
-        - 分块计算：每次处理 128 张图片，避免一次性计算过大的矩阵
+        - 内存优化：仅保存达到阈值的候选边，不创建 N×N 邻接矩阵
+        - 回退策略：FAISS不可用时每次处理128张图片，避免一次性计算大矩阵
     """
     # 参数验证：确保阈值在合理范围内
     if not (-1 <= similarity <= 1) or not (0 <= max_distance <= 64):
@@ -282,46 +382,34 @@ def generate_groups(library=LIBRARY, index_file=INDEX_FILE, similarity=0.94, max
     # units 字典：以单元组的第一个成员为代表元，值为该组所有成员列表
     units = {members[0]: members for members in exact_buckets.values()}
 
-    # 建立文件名到索引位置的映射，用于快速访问邻接矩阵
+    # 建立文件名到索引位置的映射，用于候选边查询
     names = sorted(info)
     positions = {name: i for i, name in enumerate(names)}
 
-    # 第二步：构建布尔邻接矩阵，记录哪些图片对满足相似条件
-    # 使用 numpy 布尔数组而非 Python 字典，节省内存（避免存储数百万图片对）
-    adjacent = np.eye(len(names), dtype=bool)  # 初始化对角线为 True（自己与自己相邻）
-    # 将所有 CLIP 向量堆叠为矩阵，便于分块计算点积
-    matrix = np.stack([vectors[n] for n in names]) if names else np.empty((0, 512), dtype=np.float32)
-
+    # 第二步：仅召回达到CLIP阈值的候选对，再用dHash作精筛。
+    # accepted保存稀疏候选边，内存不再固定为N×N。
+    accepted = set()
     similar_pairs, similar_count = [], 0
-    # 分块计算余弦相似度：每次处理 128 张图片，避免一次性计算过大的矩阵
-    for start in range(0, len(names), 128):
-        # 计算当前块（128 张）与所有图片的点积（即余弦相似度，因为向量已归一化）
-        scores = matrix[start:start + 128] @ matrix.T
-        for offset, row in enumerate(scores):
-            i = start + offset
-            # 只检查上三角部分（j > i），避免重复计算和自比较
-            # np.flatnonzero 返回满足条件（相似度 >= 阈值）的索引
-            for j in np.flatnonzero(row[i + 1:] >= similarity) + i + 1:
-                a, b = names[i], names[j]
-                # 计算 dHash 汉明距离
-                distance = (info[a]["dhash"] ^ info[b]["dhash"]).bit_count()
-                # 判定是否满足邻接条件：SHA-256 相同 或 汉明距离在阈值内
-                if info[a]["sha256"] == info[b]["sha256"] or distance <= max_distance:
-                    # 满足条件，标记为相邻（双向）
-                    adjacent[i, j] = adjacent[j, i] = True
-                else:
-                    # 向量相似度高但 dHash 距离大，记录为"相似但未合并"的对
-                    # 这类对可能帮助排查误判，但不足以入组
-                    similar_count += 1
-                    if len(similar_pairs) < 200:
-                        similar_pairs.append(classify_pair(a, b, info, vectors, similarity, max_distance))
+    candidates, candidate_backend = threshold_pairs(names, vectors, min(similarity, 0.75))
+    for i, j, _score in candidates:
+        a, b = names[i], names[j]
+        distance = hash_distance(info[a], info[b])
+        perceptual_distance = phash_distance(info[a], info[b])
+        chroma_distance = color_distance(info[a], info[b])
+        if (info[a]["sha256"] == info[b]["sha256"] or
+                near_duplicate_decision(_score, distance, perceptual_distance, chroma_distance,
+                                        similarity, max_distance)):
+            accepted.add((i, j))
+        else:
+            similar_count += 1
+            if len(similar_pairs) < 200:
+                similar_pairs.append(classify_pair(a, b, info, vectors, similarity, max_distance))
 
     # 完全重复组内部强制标记为相邻，不依赖向量分数
     # 原因：浮点精度可能导致相同文件的向量点积略低于 1.0，但仍应视为完全重复
     for members in units.values():
         ids = [positions[name] for name in members]
-        # np.ix_ 用于选择子矩阵，将单元组内所有图片对标记为相邻
-        adjacent[np.ix_(ids, ids)] = True
+        accepted.update((left, right) for left, right in combinations(ids, 2))
 
     def pair(a, b):
         """辅助函数：对两张图片调用 classify_pair 进行分类"""
@@ -330,7 +418,7 @@ def generate_groups(library=LIBRARY, index_file=INDEX_FILE, similarity=0.94, max
     # 定义单元组之间的匹配函数：两个单元组匹配当且仅当它们之间的所有图片对都相邻
     # 这保证了最终分组的全连接性质：组内任意两张图片都满足相似条件
     def matches(a, b):
-        return all(adjacent[positions[x], positions[y]]
+        return all(tuple(sorted((positions[x], positions[y]))) in accepted
                    for x in units[a] for y in units[b])
 
     # 第三步：使用贪心算法将单元组分组
@@ -348,14 +436,27 @@ def generate_groups(library=LIBRARY, index_file=INDEX_FILE, similarity=0.94, max
             continue
         # 收集组内图片对的分类证据，最多 200 对（避免输出过大）
         evidence = [pair(a, b) for a, b in islice(combinations(members, 2), 200)]
-        # 推荐保留项：按像素数量最多选择，并列时按文件名字典序
-        # 注意：仅按像素数量推荐，不声称分辨率最高就一定质量最好
-        keeper = min(members, key=lambda n: (-info[n]["width"] * info[n]["height"], n))
+        # 推荐保留项：综合分辨率、清晰度与曝光，分数并列时再比较像素数。
+        keeper = min(members, key=lambda n: (-info[n]["quality_score"],
+                                              -info[n]["width"] * info[n]["height"], n))
+        # 组内代表图使用 CLIP 平均相似度最高的 medoid，对应真实素材文件。
+        representative = max(
+            members,
+            key=lambda n: (sum(float(np.clip(vectors[n] @ vectors[m], -1, 1))
+                               for m in members) / len(members), -members.index(n)),
+        )
+        keeper_info = info[keeper]
         groups.append({"id": len(groups) + 1,
                        # 若单元组数量为 1，说明是完全重复组；否则为近重复组
                        "category": "exact" if len(unit_group) == 1 else "near",
-                       "members": members, "suggested_keep": keeper,
-                       "keep_reason": "像素数量最多；并列按文件名排序，需人工确认",
+                       "members": members, "representative": representative,
+                       "suggested_keep": keeper,
+                       "quality_scores": {name: info[name]["quality_score"] for name in members},
+                       "keep_reason": (
+                           f"综合质量分 {keeper_info['quality_score']:.2f}："
+                           f"{keeper_info['width']}×{keeper_info['height']}，"
+                           f"清晰度 {keeper_info['sharpness']:.2f}，亮度 {keeper_info['brightness']:.2f}；需人工确认"
+                       ),
                        "pairs": evidence,
                        # 组内图片对的总数（组合数 C(n,2)）
                        "pair_count": len(members) * (len(members) - 1) // 2})
@@ -363,6 +464,8 @@ def generate_groups(library=LIBRARY, index_file=INDEX_FILE, similarity=0.94, max
     # 构建报告字典，包含所有分组信息和辅助数据
     report = {
         "thresholds": {"cosine": similarity, "dhash_distance": max_distance},
+        "candidate_backend": candidate_backend,
+        "candidate_pair_count": len(candidates),
         "notice": "实验阈值，结果待人工核对；不执行删除。相似标签仅指向量达到阈值而哈希未通过。",
         "strategy": "先合并完全重复文件，再按文件名顺序入组，组内所有图片对须通过判定",
         "images": info, "groups": groups, "singletons": singles, "skipped": skipped,

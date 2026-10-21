@@ -1,0 +1,24 @@
+{
+  "scope": "缓存权重后的真实OpenCLIP CPU/GPU推理；包含图片解码与预处理，不包含下载。",
+  "runtime": {
+    "python": "3.12.3",
+    "platform": "Windows-11-10.0.22631-SP0",
+    "device": "cpu"
+  },
+  "model": {
+    "name": "ViT-B-32-quickgelu",
+    "weights": "openai",
+    "images": 8,
+    "batch_size": 8
+  },
+  "results": {
+    "load_seconds": 17.959,
+    "single_total_seconds": 0.657,
+    "single_images_per_second": 12.169,
+    "batch_total_seconds": 0.567,
+    "batch_images_per_second": 14.105,
+    "speedup": 1.159,
+    "failures": {},
+    "rss_mb": 927.93
+  }
+}
