@@ -8,13 +8,13 @@
 - 素材库图片搜索
 - 向量索引保存与读取
 - 本地网页版：浏览、导入、以图搜图、重复组查看与清单导出
-- 57 项自动化测试全绿；四路信号消融实验与人工真值交叉验证（C 测试与文档分工）
+- 57 项自动化测试全绿；四路信号消融实验与人工真值交叉验证
 
 当前模型：ViT-B-32-quickgelu
 预训练权重：openai
 运行方式：自动选择 CUDA，GPU 不可用时使用 CPU
 
-## B 后端工程化版本
+## 后端工程化版本
 
 `backend/b-model-index` 分支在原型功能之上新增：
 
@@ -135,7 +135,7 @@ python -m unittest test_group_duplicates -v
 从增量索引读取向量，检查素材没有变化后生成 `data/index/duplicate_groups.json`，不删除原图，也不重新调用模型。
 
 - exact：SHA-256 相同的完全重复文件。
-- near：不同文件的向量余弦相似度至少 0.94，且 64 位差分感知哈希（dHash）距离不超过 6。该默认方案是保守基线；500张图库的调参与独立测试结果见 `LIBRARY_EVALUATION_RESULTS.md`。
+- near：不同文件的向量余弦相似度至少 0.94，且 64 位差分感知哈希（dHash）距离不超过 6。该默认方案是保守基线；500 张图库的回归评测与调参结果见 `LIBRARY_EVALUATION_RESULTS.md`，未参与调参的最终留出集验收见 `FINAL_HOLDOUT_RESULTS.md`。
 - similar：向量达到上述阈值，但感知哈希不通过，仅列入相似图片对，不据此合并。
 - 其他图片保持独立。这些标签是算法判定，不是人工标准答案。
 
@@ -158,7 +158,7 @@ python evaluate_duplicates.py prepare
 python evaluate_duplicates.py evaluate
 ```
 
-prepare 默认从 `data/library` 中选择 10 张 `pexels-*` 图片（随机种子 42），按原图划分为 6 张调参原图和 4 张测试原图。每张生成 7 个版本：标准化原图、文件副本、50% 缩放、亮度 70%、四边各裁去 10%、右下角水印、JPEG 质量 55。原图预处理为 RGB，最长边不超过 1024；全部文件写入独立的 `data/evaluation`，原素材不变。已存在的评测目录不会覆盖，可用 `--dataset data/evaluation_v2` 指定新目录。
+prepare 默认从 `data/library` 中选择 10 张 `photo_*` 图片（随机种子 42），按原图划分为 6 张调参原图和 4 张测试原图。每张生成 7 个版本：标准化原图、文件副本、50% 缩放、亮度 70%、四边各裁去 10%、右下角水印、JPEG 质量 55。原图预处理为 RGB，最长边不超过 1024；全部文件写入独立的 `data/evaluation`，原素材不变。已存在的评测目录不会覆盖，可用 `--dataset data/evaluation_v2` 指定新目录。
 
 自备原图目录示例：
 
@@ -177,13 +177,13 @@ evaluate 建立独立增量索引，比较 9 组候选阈值（余弦 0.90/0.94/
 python evaluate_library.py
 ```
 
-脚本严格核对清单、磁盘和索引哈希，仅用calibration分区选择阈值，再一次性报告test分区；同时对比简单传递闭包与系统全连接约束聚类。当前独立测试结果：图片对F1为0.9471；全连接聚类查准率98.55%、召回率92.39%、F1为0.9537，详见 `LIBRARY_EVALUATION_RESULTS.md` 和JSON原始结果。若依据测试结果继续改算法，需另留新的来源图用于最终验收。
+脚本严格核对清单、磁盘和索引哈希，仅用调参集选择阈值，再一次性报告回归分区；同时对比简单传递闭包与系统全连接约束聚类。当前回归结果：默认 0.94/6 与调参选出 0.96/4 均为 P/R/F1 100%（零误判零漏判）；全连接约束聚类 0 错误合并组、0 拆组，详见 `LIBRARY_EVALUATION_RESULTS.md` 和 JSON 原始结果。未参与调参的最终留出集验收见 `FINAL_HOLDOUT_RESULTS.md`。若依据测试结果继续改算法，需另留新的来源图用于最终验收。
 
 ```bat
 python -m unittest test_evaluate_library test_evaluate_duplicates test_group_duplicates test_incremental_search -v
 ```
 
-消融实验与真值交叉验证（C 交付：量化四路信号的贡献，并核验程序化真值符合人工直觉）：
+消融实验与真值交叉验证（量化四路信号的贡献，并核验程序化真值符合人工直觉）：
 
 ```bat
 python ablation_study.py
