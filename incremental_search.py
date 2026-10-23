@@ -42,11 +42,19 @@ import argparse
 import hashlib
 import json
 import os
+import sys
 import tempfile
 import time
 from pathlib import Path
 
 import numpy as np
+
+# 进度输出可能包含中文：当进程 stdout 为 ASCII/cp1252 等窄编码（如 CI runner）
+# 时，直接 print 会抛 UnicodeEncodeError 中断任务。这里仅放宽错误处理，
+# 不做编码改写，保证任何环境下进度打印都不会成为崩溃点。
+for _stream in (sys.stdout, sys.stderr):
+    if _stream is not None and hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(errors="replace")
 
 # ==================== 全局常量配置 ====================
 # 项目根目录，用于构建相对路径

@@ -20,4 +20,5 @@ jobs:
       - name: Run backend tests without model download
         env:
           IMAGE_LIBRARY_DEVICE: cpu
+          PYTHONIOENCODING: utf-8
         run: python -m unittest discover -v
