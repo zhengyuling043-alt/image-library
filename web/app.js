@@ -91,6 +91,7 @@ function card(item, {selectable = false, score, group, badge, reason, category, 
   meta.append(node("span", "status-dot " + item.status, {ready: "● 已入库", pending: "● 待更新", failed: "● 读取失败"}[item.status] || ""));
   info.append(name, meta);
   if (reason) info.append(node("p", "match-explanation", `${category || "依据"} · ${reason}`));
+  if (interpretation) info.append(node("p", "match-interpretation", interpretation));
   article.append(visual, info); return article;
 }
 function updateSelection() {

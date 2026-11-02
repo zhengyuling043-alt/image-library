@@ -32,7 +32,7 @@ def explain_image_result(score, query_sha, query_info, candidate_sha, candidate_
                                  PRESETS["balanced"]["dhash_distance"]):
         category, reason = "近重复", f"CLIP、dHash {distance}、pHash {perceptual_distance} 与RGB色度 {chroma_distance:.3f} 共同通过"
     elif score >= PRESETS["broad"]["cosine"]:
-        category, reason = "相似", "CLIP 视觉语义相近，但未达到近重复的双重条件"
+        category, reason = "相似", "CLIP 语义相近但哈希结构校验未通过，属于不同图片，不会合并删除"
     else:
         category, reason = "相关候选", "按 CLIP 余弦相似度排序，建议人工确认"
     return {"category": category, "reason": reason, "dhash_distance": distance,
